@@ -184,12 +184,9 @@ def run_pipeline(
             clamp_bounds_to_neighbors(peaks)
 
             if compute_peak_metrics:
-                compute_areas(
-                    x,
-                    y_metric,
-                    peaks,
-                    use_fwhm_bounds=not params.background.enabled,
-                )
+                # §38:默认峰边界取局部极小值(全峰面积);
+                # FWHM 边界只用于报告半高宽,不用于 Area 积分区间
+                compute_areas(x, y_metric, peaks, use_fwhm_bounds=False)
 
     if x.size < 3:
         warnings.append("数据点太少,未进行寻峰")

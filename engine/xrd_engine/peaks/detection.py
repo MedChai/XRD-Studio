@@ -72,17 +72,18 @@ class DetectionDiagnostics:
 def _resolve_intensity_range(y: np.ndarray) -> float:
     """谱的强度范围,用于把百分比语义参数换算成绝对阈值。
 
-    用 P99.5 - P0.5 而不是 max - min:单个尖刺噪声会让 max 虚高,
-    进而让所有百分比阈值失效。
+    高端用 max(最强峰顶),低端用中位数(基线的稳健估计)。
+
+    为什么不用 P99.5-P0.5:在细网格上(0.005° 步长)一个 0.2° 宽的峰
+    只占全谱 <0.2% 的点,P99.5 根本够不到峰顶,range 会坍缩到噪声量级,
+    结果是整条基线噪声被当成几百个峰检出。max 对"最强反射"的定义
+    与用户说「相对最强峰 5%」时的直觉一致;中位数对基线漂移与噪声
+    都稳健。
     """
     finite = y[np.isfinite(y)]
     if finite.size == 0:
         return 0.0
-    if finite.size < 20:
-        return float(finite.max() - finite.min())
-    lo, hi = np.percentile(finite, [0.5, 99.5])
-    span = float(hi - lo)
-    # 百分位差为 0 时(全平线)退回真实极差
+    span = float(finite.max() - np.median(finite))
     return span if span > 0 else float(finite.max() - finite.min())
 
 

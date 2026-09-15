@@ -88,11 +88,12 @@ def find_local_minima_bounds(
 
     peak_idx = int(np.argmin(np.abs(x_arr - peak_position)))
 
-    # 向左搜索:值连续上升即到谷
+    # 向左搜索(下标递减):走过谷底后,继续向左 y 会「上升」,
+    # 即 y[i] > y[i+1]。连续 2 次判定到达谷底,谷停在 i+1。
     left_idx = peak_idx
     rising_count = 0
     for i in range(peak_idx - 1, 0, -1):
-        if y_arr[i] <= y_arr[i + 1]:
+        if y_arr[i] > y_arr[i + 1]:
             rising_count += 1
             if rising_count >= 2:
                 left_idx = i + 1
@@ -103,11 +104,11 @@ def find_local_minima_bounds(
     else:
         left_idx = max(0, left_idx)
 
-    # 向右搜索
+    # 向右搜索(下标递增):谷底之后 y[i] > y[i-1]
     right_idx = peak_idx
     rising_count = 0
     for i in range(peak_idx + 1, x_arr.size - 1):
-        if y_arr[i] <= y_arr[i - 1]:
+        if y_arr[i] > y_arr[i - 1]:
             rising_count += 1
             if rising_count >= 2:
                 right_idx = i - 1
