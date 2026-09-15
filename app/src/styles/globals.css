@@ -1,0 +1,193 @@
+@import "tailwindcss";
+
+/* ============================================================
+   XRD Studio 设计 Token(README §6)
+   组件禁止硬编码色值,一律用 var(--token)。
+   ============================================================ */
+
+:root {
+  /* ---- Light(§6.3)---- */
+  --bg-app: #f5f5f7;
+  --bg-sidebar: rgba(248, 248, 250, 0.86);
+  --bg-panel: #ffffff;
+  --bg-elevated: rgba(255, 255, 255, 0.86);
+
+  --text-primary: #1d1d1f;
+  --text-secondary: #6e6e73;
+  --text-tertiary: #9a9aa0;
+
+  --divider: rgba(0, 0, 0, 0.08);
+  --hover: rgba(0, 0, 0, 0.045);
+  --selected: rgba(0, 122, 255, 0.1);
+
+  --accent: #007aff;
+  --danger: #ff3b30;
+  --success: #34c759;
+  --warning: #ff9f0a;
+
+  /* ---- 形状与阴影(§6.4)---- */
+  --radius-control: 6px;
+  --radius-input: 8px;
+  --radius-button: 9px;
+  --radius-panel: 12px;
+  --radius-card: 14px;
+  --radius-dialog: 16px;
+
+  --shadow-panel: 0 1px 2px rgba(0, 0, 0, 0.04), 0 4px 18px rgba(0, 0, 0, 0.04);
+  --shadow-dialog: 0 20px 60px rgba(0, 0, 0, 0.18);
+
+  /* ---- 动效(§6.4,禁止 bounce / >300ms)---- */
+  --t-fast: 140ms;
+  --t-med: 180ms;
+  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
+
+  /* ---- 布局尺寸 ---- */
+  --topbar-h: 52px;
+  --statusbar-h: 28px;
+  --sidebar-w: 248px;
+  --inspector-w: 296px;
+
+  /* ---- 图表 ---- */
+  --plot-bg: #ffffff;
+  --plot-line: #1d1d1f;
+  --plot-grid: rgba(0, 0, 0, 0.06);
+  --plot-axis: rgba(0, 0, 0, 0.4);
+
+  color-scheme: light;
+}
+
+[data-theme="dark"] {
+  --bg-app: #171719;
+  --bg-sidebar: rgba(27, 27, 30, 0.88);
+  --bg-panel: #202023;
+  --bg-elevated: #29292d;
+
+  --text-primary: #f5f5f7;
+  --text-secondary: #a1a1a6;
+  --text-tertiary: #737378;
+
+  --divider: rgba(255, 255, 255, 0.09);
+  --hover: rgba(255, 255, 255, 0.055);
+  --selected: rgba(10, 132, 255, 0.18);
+
+  --accent: #0a84ff;
+  --danger: #ff453a;
+  --success: #30d158;
+  --warning: #ff9f0a;
+
+  --shadow-panel: 0 1px 2px rgba(0, 0, 0, 0.3), 0 4px 18px rgba(0, 0, 0, 0.25);
+  --shadow-dialog: 0 20px 60px rgba(0, 0, 0, 0.5);
+
+  --plot-bg: #202023;
+  --plot-line: #f5f5f7;
+  --plot-grid: rgba(255, 255, 255, 0.08);
+  --plot-axis: rgba(255, 255, 255, 0.45);
+
+  color-scheme: dark;
+}
+
+/* Tailwind v4:把 token 映射成 utility 可用的 theme 变量 */
+@theme inline {
+  --color-app: var(--bg-app);
+  --color-panel: var(--bg-panel);
+  --color-elevated: var(--bg-elevated);
+  --color-ink: var(--text-primary);
+  --color-ink-2: var(--text-secondary);
+  --color-ink-3: var(--text-tertiary);
+  --color-line: var(--divider);
+  --color-hover: var(--hover);
+  --color-selected: var(--selected);
+  --color-accent: var(--accent);
+  --color-danger: var(--danger);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter,
+    "Helvetica Neue", Arial, "Microsoft YaHei UI", sans-serif;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+body {
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-primary);
+  background: var(--bg-app);
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+
+/* 数字一律等宽(§6.2) */
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+/* 统一的克制过渡(§6.4) */
+.tr {
+  transition: background-color var(--t-fast) ease, color var(--t-fast) ease,
+    opacity var(--t-fast) ease, transform var(--t-med) var(--ease-out),
+    border-color var(--t-fast) ease, box-shadow var(--t-fast) ease;
+}
+
+/* 细滚动条,macOS 风 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--divider);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-tertiary);
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* 毛玻璃层(§8 Sidebar/Elevated) */
+.blur-surface {
+  backdrop-filter: blur(20px) saturate(1.6);
+  -webkit-backdrop-filter: blur(20px) saturate(1.6);
+}
+
+/* Radix slider 基础样式走 token */
+.slider-track {
+  position: relative;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--divider);
+  flex: 1;
+}
+.slider-range {
+  position: absolute;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--accent);
+}
+.slider-thumb {
+  display: block;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  border: 1px solid var(--divider);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
+  cursor: grab;
+  outline: none;
+  transition: transform var(--t-fast) var(--ease-out);
+}
+.slider-thumb:active {
+  cursor: grabbing;
+  transform: scale(1.08);
+}
+[data-theme="dark"] .slider-thumb {
+  background: #e8e8ea;
+}

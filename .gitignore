@@ -1,0 +1,21 @@
+# 构建产物
+node_modules/
+dist/
+target/
+__pycache__/
+*.pyc
+.venv/
+
+# 运行时数据(绝不入库)
+XRDStudio/
+
+# 环境与 IDE
+.env
+.env.local
+.vscode/
+.idea/
+*.local
+
+# OS
+Thumbs.db
+.DS_Store

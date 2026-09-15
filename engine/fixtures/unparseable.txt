@@ -1,0 +1,2 @@
+This file contains no numeric data at all.
+Just some prose describing an experiment.
