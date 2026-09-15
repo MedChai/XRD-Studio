@@ -160,7 +160,7 @@ class TestSmoothingConstraints:
     """§7.3:UI/引擎双重保证奇数窗口与 polyorder < window。"""
 
     def test_even_window_rejected_or_fixed(self):
-        w, p = validate_savgol_params(8, 2, 1000)
+        w, _p = validate_savgol_params(8, 2, 1000)
         assert w % 2 == 1
 
     def test_polyorder_ge_window_rejected(self):

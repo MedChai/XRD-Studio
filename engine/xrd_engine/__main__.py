@@ -87,7 +87,7 @@ def main() -> int:
 
         try:
             result = engine.handle(cmd, payload)
-        except Exception:  # noqa: BLE001 兜底,任何漏网异常都不该杀死进程
+        except Exception:
             sys.stderr.write(traceback.format_exc())
             sys.stderr.flush()
             result = {"ok": False, "error": "引擎内部错误", "detail": ""}

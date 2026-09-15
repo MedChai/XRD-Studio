@@ -237,7 +237,7 @@ class TestPeaksPersistence:
 
 class TestPresets:
     def test_save_list_apply(self, with_dataset, fixtures_dir):
-        engine, pid, sample_id, ds_id = with_dataset
+        engine, pid, _sample_id, ds_id = with_dataset
         # 第二个样品第二个数据集,用于批量应用
         r = engine.handle("datasets.import", {
             "paths": [str(fixtures_dir / "lfp_400c_scan01.xy")],
@@ -272,7 +272,7 @@ class TestPresets:
 
 class TestLibrary:
     def test_tree_structure(self, with_dataset):
-        engine, _, sample_id, ds_id = with_dataset
+        engine, _, _sample_id, ds_id = with_dataset
         r = engine.handle("library.tree", {})
         assert r["ok"]
         samples = r["data"]["samples"]

@@ -39,6 +39,13 @@ fn engine() -> &'static Engine {
     })
 }
 
+/// sidecar 启动互斥锁:确保任意时刻只有一个线程在 spawn。
+static START_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn start_lock() -> &'static Mutex<()> {
+    START_LOCK.get_or_init(|| Mutex::new(()))
+}
+
 // ------------------------------------------------------------------
 // sidecar 定位:开发用 engine/.venv,生产用同目录 xrd-engine.exe(§11.1)
 // ------------------------------------------------------------------
@@ -135,11 +142,12 @@ fn read_frame(r: &mut dyn Read) -> std::io::Result<Value> {
 
 fn ensure_running(data_root: &std::path::Path) -> Result<(), String> {
     let eng = engine();
-    let stdin_guard = eng.stdin.lock().unwrap();
-    if stdin_guard.is_some() {
-        return Ok(()); // 已在运行(简单判定:stdin 句柄存在)
+    // 启动全程持锁:并发请求(如首屏 Promise.all)不能都穿过
+    // "检查未运行 → spawn" 的间隙,否则 sidecar 被重复拉起。
+    let _start_guard = start_lock().lock().unwrap();
+    if eng.stdin.lock().unwrap().is_some() {
+        return Ok(()); // 已在运行(判定:stdin 句柄存在)
     }
-    drop(stdin_guard);
 
     let mut child = sidecar_command(data_root)
         .stdin(Stdio::piped())
