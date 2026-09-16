@@ -1,9 +1,9 @@
 /** 控件库:全部走设计 token,禁止硬编码色值(§6)。 */
 
-import * as Slider from "@radix-ui/react-slider";
 import * as ToggleGroup from "@radix-ui/react-toggle-group";
 import type { ReactNode } from "react";
 import { cn } from "./cn";
+import { RangeSlider } from "./Slider";
 
 export function Button({
   children,
@@ -136,19 +136,13 @@ export function LabeledSlider({
 }) {
   return (
     <div className="flex items-center gap-2 px-3 py-1">
-      <Slider.Root
-        className="flex flex-1 items-center"
+      <RangeSlider
         value={[value]}
         min={min}
         max={max}
         step={step}
         onValueChange={([v]) => onChange(v)}
-      >
-        <Slider.Track className="slider-track">
-          <Slider.Range className="slider-range" />
-        </Slider.Track>
-        <Slider.Thumb className="slider-thumb" />
-      </Slider.Root>
+      />
       <span className="tabular w-12 text-right text-[12px] font-medium text-[var(--text-primary)]">
         {display ?? value}
       </span>

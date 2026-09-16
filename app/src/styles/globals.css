@@ -159,6 +159,21 @@ body {
 }
 
 /* Radix slider 基础样式走 token */
+
+/* Slider.Root 的定位上下文。**必须有 position: relative**:
+ * Radix 只给 Root 注入 `--radix-slider-thumb-transform`,Thumb 外层 span 是
+ * `position: absolute; left: calc(N%)`。而 Thumb 是 Track 的**兄弟**不是子节点,
+ * 所以 .slider-track 的 position: relative 管不到它 —— 缺了这条,
+ * Thumb 的包含块会退化成视口,手柄被画到窗口水平正中(表现为绘图区里一个白圆点),
+ * 轨道上反而看不到手柄。 */
+.slider-root {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 1;
+  user-select: none;
+  touch-action: none;
+}
 .slider-track {
   position: relative;
   height: 4px;

@@ -1,6 +1,5 @@
 /** 右侧 Inspector(§27):PROCESSING / PEAKS / DISPLAY / SAMPLE 四段。 */
 
-import * as Slider from "@radix-ui/react-slider";
 import { useState } from "react";
 import { ChevronDown } from "lucide-react";
 import {
@@ -11,6 +10,7 @@ import {
   Segmented,
   SwitchRow,
 } from "../../components/controls";
+import { RangeSlider } from "../../components/Slider";
 import { useAnalysisStore, usePlotStore, useUiStore } from "../../stores";
 import { engineCommand } from "../../services/engine";
 import { cn } from "../../components/cn";
@@ -64,8 +64,7 @@ export function Inspector() {
                   </span>
                 </Row>
                 <div className="flex items-center gap-2 px-3 py-1">
-                  <Slider.Root
-                    className="flex flex-1 items-center"
+                  <RangeSlider
                     value={[Math.log10(bg.smoothness)]}
                     min={2}
                     max={10}
@@ -75,12 +74,7 @@ export function Inspector() {
                         background: { ...bg, smoothness: Math.pow(10, v) },
                       })
                     }
-                  >
-                    <Slider.Track className="slider-track">
-                      <Slider.Range className="slider-range" />
-                    </Slider.Track>
-                    <Slider.Thumb className="slider-thumb" />
-                  </Slider.Root>
+                  />
                 </div>
                 <Row label="Asymmetry">
                   <NumberField
@@ -119,8 +113,7 @@ export function Inspector() {
               <span className="tabular text-[12px] font-medium">{sm.window_length}</span>
             </Row>
             <div className="flex items-center gap-2 px-3 py-1">
-              <Slider.Root
-                className="flex flex-1 items-center"
+              <RangeSlider
                 value={[sm.window_length]}
                 min={3}
                 max={101}
@@ -128,12 +121,7 @@ export function Inspector() {
                 onValueChange={([v]) =>
                   patch({ smoothing: { ...sm, window_length: Math.round(v) | 1 } })
                 }
-              >
-                <Slider.Track className="slider-track">
-                  <Slider.Range className="slider-range" />
-                </Slider.Track>
-                <Slider.Thumb className="slider-thumb" />
-              </Slider.Root>
+              />
             </div>
             {smoothingAffects && (
               <div className="mx-3 my-1 rounded-[var(--radius-control)] bg-[color-mix(in_srgb,var(--warning)_14%,transparent)] px-2 py-1.5 text-[11px] text-[var(--text-secondary)]">
@@ -242,19 +230,14 @@ export function Inspector() {
         </Row>
         <Row label={`Offset${offset !== 0 ? ` ${offset.toFixed(0)}` : ""}`}>
           <div className="w-28">
-            <Slider.Root
-              className="flex w-full items-center"
+            <RangeSlider
+              className="w-full"
               value={[offset]}
               min={-100}
               max={100}
               step={1}
               onValueChange={([v]) => setOffset(v)}
-            >
-              <Slider.Track className="slider-track">
-                <Slider.Range className="slider-range" />
-              </Slider.Track>
-              <Slider.Thumb className="slider-thumb" />
-            </Slider.Root>
+            />
           </div>
         </Row>
       </section>

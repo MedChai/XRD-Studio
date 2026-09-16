@@ -47,10 +47,13 @@ function XRDChartInner({ onPeakClick }: Props) {
 
   const markData = useMemo(() => {
     if (!curve || !showLabels || peaks.length === 0) return undefined;
-    const maxY = curve.y.reduce((m, v) => (v > m ? v : m), 1);
+    // 与 seriesData 用同一套归一化(maxY 的取法保持一致,否则圆点会与曲线错位)
+    const maxY = curve.y.reduce((m, v) => (v > m ? v : m), 0) || 1;
     return peaks.map((p: PeakResult) => ({
       name: String(p.index),
-      coord: [p.position, (p.intensity / maxY) * 100],
+      // offset 必须与 seriesData 一致:否则拖 Display 的 Offset 滑块时
+      // 曲线上下移动而圆点/标签原地不动,视觉上就是一堆悬空的点
+      coord: [p.position, (p.intensity / maxY) * 100 + offset],
       value: p.position.toFixed(2) + "°",
       itemStyle: {
         color:
@@ -70,7 +73,7 @@ function XRDChartInner({ onPeakClick }: Props) {
       symbol: "circle",
       symbolSize: selectedPeak === p.index ? 7 : 4,
     }));
-  }, [curve, peaks, showLabels, selectedPeak]);
+  }, [curve, peaks, showLabels, selectedPeak, offset]);
 
   useEffect(() => {
     if (!ref.current) return;
@@ -188,9 +191,15 @@ function XRDChartInner({ onPeakClick }: Props) {
             largeThreshold: 2000,
             lineStyle: { color: cssVar("--plot-line"), width: 1.5 },
             data: seriesData ?? [],
-            markPoint: markData
-              ? { symbol: "circle", data: markData as never, silent: false }
-              : undefined,
+            // 必须**永远**传对象:setOption 用的是 notMerge:false 合并模式,
+            // ECharts 会忽略值为 undefined 的项 —— 传 undefined 清不掉已有的
+            // markPoint,取消勾选「峰标签」后旧圆点与标签会残留(幽灵标记)。
+            // 用空数组才是真正的"清空"。
+            markPoint: {
+              symbol: "circle",
+              data: (markData ?? []) as never,
+              silent: false,
+            },
           },
         ],
       },
