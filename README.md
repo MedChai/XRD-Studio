@@ -251,9 +251,16 @@ Animation: 120–220ms;
 │ Projects/Samples │                              │ Processing/    │
 │ /Datasets        │                              │ Peaks/Display  │
 ├──────────────────┴──────────────────────────────┴────────────────┤
-│ Peaks 12 ⌃   2θ 34.390°   I 31,542   3,501 pts   Saved           │  StatusBar
+│ Peaks 12 ⌃                                                       │  PeakTable
+├──────────────────────────────────────────────────────────────────┤
+│ ▁▂▅█▇▃▂▁▁▂▄█▆▃▁▁▂▃▅▇█▅▂▁   缩略谱 + 可拖动范围框                  │  RangeOverview 56px
+├──────────────────────────────────────────────────────────────────┤
+│ 2θ 34.390°   I 31,542   3,501 pts   Saved                        │  StatusBar
 └──────────────────────────────────────────────────────────────────┘
 ```
+
+RangeOverview 是**通栏**的(横跨 Sidebar + Plot + Inspector):容器底色通栏,
+内部左右留出与两栏等宽的内边距,使缩略图与绘图区对齐。
 
 ## 6.6 Sidebar / Sample Item / Dataset(与 v1 一致)
 
@@ -264,7 +271,16 @@ Animation: 120–220ms;
 ## 6.7 Plot(与 v1 一致的部分从简)
 
 - 默认:白底、无网格、X/Y 轴开、Line 1.5、Legend Auto。不画粗网格/灰底/巨图例。
-- 交互:滚轮 Zoom、拖动 Pan、双击 Fit All、触控板 Pinch。
+- 交互:滚轮 Zoom、拖动 Pan、双击 Fit All、触控板 Pinch。Fit All 另有
+  PlotHeader 按钮与 `Ctrl+0` 两个入口;双击必须绑 zrender 的 dblclick
+  (平移用 moveOnMouseMove,那一动会被当成 pan,ECharts 层级往往不派发)。
+- **视口状态用数据坐标(2θ),不是百分比**,存 `plotStore.zoom`。两个图
+  (主图与底部范围框)都只做「回放 zoom」与「写回 zoom」,绝不在 dataZoom
+  事件里回读对方状态 —— 否则死循环。
+- x 轴值域从 `curve` 首尾推导,**不得硬编码**;硬编码会让不在该区间的实测
+  谱被裁掉,且 Fit All 无从实现。
+- `☑ Show Background` 打开时以低透明度虚线叠加背景曲线;该 series 必须
+  `silent`,否则会抢走点击命中导致选峰错位,tooltip 也要取主曲线那条。
 - Crosshair + 浮动 tooltip(小、半透明、圆角、不遮数据)。
 - Overlay / Stacked 用 Segmented Control;Stacked 提供 Offset Slider。
 - Peak Labels:普通态只显示 2θ;选中态显示 Intensity/FWHM —— 否则几十峰形成文字墙。
@@ -281,6 +297,19 @@ Animation: 120–220ms;
 - 成功:`✓ Imported 3 datasets`;失败:人话 + `View details`,**永远不直接展示 Python traceback**。
 - 首次进入:居中一句 "Import a diffraction file to get started" + 一个按钮,无大插画。
 - Settings 分区:General / Appearance(Theme: System/Light/Dark;Accent)/ Data(存储位置、打开数据目录)/ Plot / About。
+
+## 6.10 语言
+
+界面语言为**简体中文**,无多语言切换。
+
+- 文案集中在 `app/src/i18n/zh.ts`,组件通过 `t.xxx` 引用。不引入 i18n 库:
+  当前只有一种语言,库会带来 Provider、语言包加载、持久化三层开销而收益为零。
+  `as const` 保留 —— 它让 key 拼写错误在 `tsc` 阶段直接报错。
+- 带参数的文案写成函数(`t.import.imported(n)`),不要字符串拼接,否则中文
+  语序无法调整。
+- **刻意保留英文**的只有三类:XRD 领域通用符号与量名(`2θ` `FWHM` `Area`
+  `Intensity` `Prominence`)、算法名(`AsLS` `Poly` `Savgol`)、产品名
+  (`XRD Studio`)。样品名占位符与文件格式串属于数据而非文案,也不译。
 
 ---
 
@@ -442,6 +471,18 @@ id, project_id, name, pipeline_json, created_at, updated_at
 ### undo_history(新增,见 §10.5)
 不落库,内存 + 会话级;落库的只有最终参数。
 
+**Trash 语义(§10.5)**:`projects` / `samples` / `datasets` 三表有 `deleted_at`,
+删除为**隐式级联** —— 只标记被直接删除的那一行,子对象的可见性由父级决定
+(查询时一并判 `deleted_at IS NULL`)。恢复父级时子对象自动全部回来,因为它
+们从未被写过 `deleted_at`。级联写会让「删项目→恢复项目」无法区分子对象是
+跟着删的还是用户本来就单独删过,要正确处理就得再加一张操作日志表。
+
+`analyses` / `peaks` / `analysis_presets` **没有** `deleted_at`:它们的可见性
+完全由父级决定,加列只会制造需要同步的冗余状态。
+
+`meta.purge` 是唯一真正删磁盘(`data/<ULID>/`)的入口;软删除刻意不碰文件,
+以便恢复时数据仍然完整。
+
 ## 8.3 Data Store 目录(与 v1 一致)
 
 ```text
@@ -568,18 +609,30 @@ datasets.list / get / curve { id, crop?, downsample? } → Envelope(binary)
 analysis.get_or_create { dataset_id }
 analysis.preview  { analysis_id, patch } → Envelope(binary, curve)
 analysis.commit   { analysis_id, pipeline_json }
-peaks.detect      { analysis_id } → peaks[]
+peaks.detect      { analysis_id | dataset_id } → peaks[]
 peaks.update_bounds { peak_id, left, right } → peak
 presets.apply     { preset_id, dataset_ids[] } → analyses[]
 export.figure / export.data / export.peaks
-meta.rename / meta.soft_delete / meta.restore
+meta.rename       { table, id, name }
+meta.soft_delete  { table, id } → { cascadedDatasets }
+meta.restore      { table, id, cascade_parent? } → { restoredAncestors[] }
+trash.list        { limit? } → { items[], total }
+meta.purge        { table, id } | { all: true }
 ```
+
+`peaks.detect` 同时接受 `dataset_id` —— 前端手里通常只有它,不关心 analysis
+的内部 id,支持它能省掉一次多余往返。
+
+`trash.list` 的 `kind` 用**表名**(`projects`/`samples`/`datasets`),前端可以
+把 `item.kind` 直接透传给 `meta.restore` / `meta.purge`,不必再维护一张
+「单数 ↔ 表名」映射表。
 
 开发期可以按需起 FastAPI 复用同一引擎核心库做 curl 调试,但**接口以 command schema 为单一事实源**(Pydantic 模型 TS 类型由 `ts-pydantic`/手工同步,CI 校验一致性)。
 
 ## 10.5 Undo / Redo(定义实现方式,不再悬空)
 
 - 范围:**参数类操作**(pipeline 参数、peak bounds、normalize/offset 等显示参数、重命名)。导入/删除 Dataset 不进 undo 栈(删除走 Trash 语义,用恢复代替撤销)。
+- **Trash 语义**:删除 = 移到回收站,用**恢复**代替撤销。恢复时若父级仍在回收站,一并向上恢复父级(否则用户点了恢复却看不到东西);恢复父级时**不**向下级联 —— 子对象从未被标记删除,这是隐式级联(§8.2)带来的直接好处,不是遗漏。「彻底删除」不可恢复,必须二次确认。
 - 实现:`analysisStore` 维护有界快照栈(50 步),快照即 pipeline_json 深拷贝;`Ctrl+Z / Ctrl+Shift+Z`。
 - Undo 触发一次 preview→commit,复用 §10.3 状态机,不另写通路。
 
