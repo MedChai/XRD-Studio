@@ -1,13 +1,12 @@
 /** 顶栏(§16):52px,只有 + Import 是 Primary Button,其余 icon 化。 */
 
-import { ChevronDown, Plus, Search, Settings } from "lucide-react";
+import { Plus, Search, Settings } from "lucide-react";
 import { Button, IconButton } from "../components/controls";
-import { useProjectStore, useUiStore } from "../stores";
+import { ProjectSwitcher } from "./ProjectSwitcher";
+import { useUiStore } from "../stores";
 
 export function TopBar() {
-  const { projects, currentProjectId } = useProjectStore();
   const { setImportOpen, setPaletteOpen, setSettingsOpen } = useUiStore();
-  const current = projects.find((p) => p.id === currentProjectId);
 
   return (
     <header
@@ -17,10 +16,7 @@ export function TopBar() {
       <span className="text-[13px] font-semibold text-[var(--text-primary)]">
         XRD Studio
       </span>
-      <button className="tr flex items-center gap-1 rounded-[var(--radius-control)] px-2 py-1 text-[13px] text-[var(--text-secondary)] hover:bg-[var(--hover)]">
-        {current?.name ?? "No Project"}
-        <ChevronDown size={13} />
-      </button>
+      <ProjectSwitcher />
       <div className="flex-1" />
       <IconButton title="搜索 (Ctrl+K)" onClick={() => setPaletteOpen(true)}>
         <Search size={16} />

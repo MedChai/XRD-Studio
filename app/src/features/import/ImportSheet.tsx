@@ -62,7 +62,14 @@ export function ImportSheet() {
   }
 
   async function runImport(xColumn?: number, yColumn?: number) {
-    if (!paths.length || project == null) return;
+    if (!paths.length) return;
+    if (project == null) {
+      // 空 Library 的第一步:先建项目,避免静默失败
+      showToast("error", "请先创建项目");
+      setOpen(false);
+      useUiStore.getState().setNewProjectOpen(true);
+      return;
+    }
     setBusy(true);
     const r = await engineCommand<ImportResult>("datasets.import", {
       paths,

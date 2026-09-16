@@ -57,6 +57,8 @@ interface ProjectState {
   samples: SampleNode[];
   currentProjectId: number | null;
   load: () => Promise<void>;
+  setCurrentProject: (id: number) => void;
+  createProject: (name: string, description?: string) => Promise<number | null>;
 }
 
 export const useProjectStore = create<ProjectState>((set, get) => ({
@@ -76,6 +78,20 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       });
     }
     if (t.ok) set({ samples: t.data.samples });
+  },
+  setCurrentProject: (id) => set({ currentProjectId: id }),
+  createProject: async (name, description = "") => {
+    const r = await engineCommand<{ projectId: number }>("projects.create", {
+      name,
+      description,
+    });
+    if (r.ok) {
+      await get().load();
+      set({ currentProjectId: r.data.projectId });
+      return r.data.projectId;
+    }
+    useUiStore.getState().showToast("error", r.error);
+    return null;
   },
 }));
 
@@ -289,6 +305,7 @@ interface UiState {
   importOpen: boolean;
   paletteOpen: boolean;
   settingsOpen: boolean;
+  newProjectOpen: boolean;
   toast: { kind: "success" | "error"; text: string } | null;
   /** 拖放进来的文件路径,由 AppShell 写入、ImportSheet 消费 */
   pendingDropPaths: string[] | null;
@@ -297,6 +314,7 @@ interface UiState {
   setImportOpen: (v: boolean) => void;
   setPaletteOpen: (v: boolean) => void;
   setSettingsOpen: (v: boolean) => void;
+  setNewProjectOpen: (v: boolean) => void;
   setPendingDropPaths: (v: string[] | null) => void;
   setLastSampleId: (v: number | null) => void;
   showToast: (kind: "success" | "error", text: string) => void;
@@ -307,12 +325,14 @@ export const useUiStore = create<UiState>((set) => ({
   importOpen: false,
   paletteOpen: false,
   settingsOpen: false,
+  newProjectOpen: false,
   toast: null,
   pendingDropPaths: null,
   lastSampleId: null,
   setImportOpen: (importOpen) => set({ importOpen }),
   setPaletteOpen: (paletteOpen) => set({ paletteOpen }),
   setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
+  setNewProjectOpen: (newProjectOpen) => set({ newProjectOpen }),
   setPendingDropPaths: (pendingDropPaths) => set({ pendingDropPaths }),
   setLastSampleId: (lastSampleId) => set({ lastSampleId }),
   showToast: (kind, text) => {

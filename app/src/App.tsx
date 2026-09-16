@@ -10,6 +10,7 @@ import { TopBar } from "./components/TopBar";
 import { LibrarySidebar } from "./components/LibrarySidebar";
 import { StatusBar } from "./components/StatusBar";
 import { Toast } from "./components/Toast";
+import { NewProjectDialog } from "./components/ProjectSwitcher";
 import { PlotHeader } from "./features/plot/PlotHeader";
 import { XRDChart } from "./features/plot/XRDChart";
 import { PeakDrawer } from "./features/peaks/PeakDrawer";
@@ -129,6 +130,7 @@ export default function App() {
       <StatusBar />
 
       <ImportSheet />
+      <NewProjectDialog />
       <CommandPalette />
       <SettingsDialog />
       <Toast />

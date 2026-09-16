@@ -70,12 +70,20 @@ export function LibrarySidebar() {
         )}
       </div>
 
-      <button
-        className="tr flex items-center gap-1.5 border-t border-[var(--divider)] px-4 py-2.5 text-[12px] text-[var(--text-secondary)] hover:bg-[var(--hover)] hover:text-[var(--text-primary)]"
-        onClick={() => setImportOpen(true)}
-      >
-        <Plus size={13} /> New Sample / Import
-      </button>
+      <div className="flex flex-col border-t border-[var(--divider)]">
+        <button
+          className="tr flex items-center gap-1.5 px-4 py-1.5 text-[12px] text-[var(--text-secondary)] hover:bg-[var(--hover)] hover:text-[var(--text-primary)]"
+          onClick={() => useUiStore.getState().setNewProjectOpen(true)}
+        >
+          <Plus size={13} /> New Project
+        </button>
+        <button
+          className="tr flex items-center gap-1.5 px-4 py-1.5 text-[12px] text-[var(--text-secondary)] hover:bg-[var(--hover)] hover:text-[var(--text-primary)]"
+          onClick={() => setImportOpen(true)}
+        >
+          <Plus size={13} /> Import / New Sample
+        </button>
+      </div>
     </aside>
   );
 }

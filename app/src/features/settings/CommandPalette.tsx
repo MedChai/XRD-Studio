@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import {
   Download,
+  FolderPlus,
   Moon,
   Search,
   Sun,
@@ -43,6 +44,7 @@ export function CommandPalette() {
   const entries = useMemo<Entry[]>(() => {
     const cmds: Entry[] = [
       { id: "import", label: "Import XRD Data", icon: <Upload size={14} />, group: "命令", run: () => useUiStore.getState().setImportOpen(true) },
+      { id: "newProject", label: "New Project", icon: <FolderPlus size={14} />, group: "命令", run: () => useUiStore.getState().setNewProjectOpen(true) },
       { id: "detect", label: "Detect Peaks", icon: <Wand2 size={14} />, group: "命令", run: () => useAnalysisStore.getState().patchPipeline({}) },
       { id: "export", label: "Export Peak Table (CSV)", icon: <Download size={14} />, group: "命令", run: () => useUiStore.getState().showToast("success", "导出功能在 Milestone 5 落地") },
       {
