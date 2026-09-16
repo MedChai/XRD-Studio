@@ -15,6 +15,7 @@ import { RenameDialog } from "./features/library/RenameDialog";
 import { TrashDialog } from "./features/library/TrashDialog";
 import { PlotHeader } from "./features/plot/PlotHeader";
 import { XRDChart } from "./features/plot/XRDChart";
+import { RangeOverview } from "./features/plot/RangeOverview";
 import { PeakDrawer } from "./features/peaks/PeakDrawer";
 import { Inspector } from "./features/processing/Inspector";
 import { ImportSheet } from "./features/import/ImportSheet";
@@ -24,6 +25,7 @@ import {
   applyTheme,
   useAnalysisStore,
   useAppStore,
+  usePlotStore,
   useProjectStore,
   useSelectionStore,
   useUiStore,
@@ -32,6 +34,9 @@ import { Button } from "./components/controls";
 import { t } from "./i18n";
 
 const isTauri = "__TAURI_INTERNALS__" in window;
+
+/** 底部范围框高度。只在有曲线时才占位,否则空状态下方会多一条空白带。 */
+const rangeOverviewHeight = 56;
 
 export default function App() {
   const theme = useAppStore((s) => s.theme);
@@ -79,6 +84,10 @@ export default function App() {
       } else if (mod && e.key === "i") {
         e.preventDefault();
         useUiStore.getState().setImportOpen(true);
+      } else if (mod && e.key === "0") {
+        // Ctrl+0 = Fit All(与 macOS 惯例一致)
+        e.preventDefault();
+        usePlotStore.getState().fitAll();
       } else if (e.key === "Escape") {
         useUiStore.getState().setPaletteOpen(false);
         useUiStore.getState().setTrashOpen(false);
@@ -134,6 +143,23 @@ export default function App() {
         </main>
         <Inspector />
       </div>
+      {/* 底部通栏范围框:横跨 Sidebar + 绘图区 + Inspector。
+          内部左右留出与两栏等宽的内边距,使缩略图与绘图区对齐,
+          而容器底色保持通栏 —— 视觉上是"通栏分隔带 + 居中的缩略图"。
+          没有曲线时不占位,免得空状态下方多一条空白带。 */}
+      {!empty && (
+        <div
+          className="shrink-0 border-t border-[var(--divider)] bg-[var(--bg-panel)]"
+          style={{ height: rangeOverviewHeight }}
+        >
+          <div
+            className="h-full"
+            style={{ paddingLeft: "var(--sidebar-w)", paddingRight: "var(--inspector-w)" }}
+          >
+            <RangeOverview />
+          </div>
+        </div>
+      )}
       <StatusBar />
 
       <ImportSheet />

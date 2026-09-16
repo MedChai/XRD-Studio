@@ -152,8 +152,13 @@ def load_file(
 
     table, _encoding = result
 
-    # 列数过多时让用户确认,不猜
-    if table.column_count > MAX_AUTO_COLUMNS:
+    # 列数过多时让用户确认,不猜。
+    # **但调用方已经显式给了列号时就不该再拦** —— 否则宽表(实验室导出
+    # 十几列很常见)永远导不进来:用户选完列,第二次调用仍撞在这个分支上,
+    # 表现为「选完列还是失败」。
+    if table.column_count > MAX_AUTO_COLUMNS and (
+        x_column is None or y_column is None
+    ):
         from .text_parser import preview_columns
 
         return ColumnMappingRequired(

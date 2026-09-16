@@ -13,6 +13,7 @@ import {
 import { RangeSlider } from "../../components/Slider";
 import { useAnalysisStore, usePlotStore, useUiStore } from "../../stores";
 import { engineCommand } from "../../services/engine";
+import type { PeakResult } from "../../types/engine";
 import { cn } from "../../components/cn";
 import { t } from "../../i18n";
 
@@ -22,11 +23,17 @@ export function Inspector() {
   const smoothingAffects = useAnalysisStore((s) => s.smoothingAffectsMetrics);
   const status = useAnalysisStore((s) => s.status);
   const loadedDatasetId = useAnalysisStore((s) => s.loadedDatasetId);
-  const { offset, setOffset, showLabels, setShowLabels } = usePlotStore();
+  const curve = useAnalysisStore((s) => s.curve);
+  const { offset, setOffset, showLabels, setShowLabels, showBackground, setShowBackground } =
+    usePlotStore();
   const [advanced, setAdvanced] = useState(false);
+  const [detecting, setDetecting] = useState(false);
   // 选择器订阅:不要用 useUiStore() 全量解构 —— uiStore 里的 toast 计时器
   // 每次变化都会重渲染整个 Inspector
   const showToast = useUiStore((s) => s.showToast);
+
+  // 引擎只在 background.enabled 时返回背景曲线
+  const hasBackground = (curve?.background?.length ?? 0) > 0;
 
   const bg = pipeline.background;
   const sm = pipeline.smoothing;
@@ -209,18 +216,32 @@ export function Inspector() {
         <div className="flex gap-2 px-3 pt-1">
           <Button
             kind="secondary"
-            disabled={loadedDatasetId == null}
+            disabled={loadedDatasetId == null || detecting}
             onClick={async () => {
-              // Detect Peaks:把当前参数 commit 后正式写 peaks 表
-              const analyses = useAnalysisStore.getState();
+              // Detect Peaks 是「固化」动作:先把当前参数落库(commit),再让
+              // 引擎按落库的参数正式跑一遍寻峰、写进 peaks 表。
+              // 此前这里只发 commit,而 commit 只写 pipeline_json —— 按钮
+              // 弹了个 toast 但数据库 peaks 表始终是空的。
+              if (loadedDatasetId == null) return;
+              setDetecting(true);
+              const pipeline = useAnalysisStore.getState().pipeline;
               await engineCommand("analysis.commit", {
                 dataset_id: loadedDatasetId,
-                pipeline: analyses.pipeline,
+                pipeline,
               });
-              showToast("success", t.inspector.detectUpdated);
+              const r = await engineCommand<{ peaks: PeakResult[] }>("peaks.detect", {
+                dataset_id: loadedDatasetId,
+              });
+              setDetecting(false);
+              if (!r.ok) {
+                showToast("error", r.error);
+                return;
+              }
+              useAnalysisStore.getState().markPeaksCommitted(r.data.peaks);
+              showToast("success", t.inspector.detected(r.data.peaks.length));
             }}
           >
-            {t.inspector.detectPeaks}
+            {detecting ? t.inspector.detecting : t.inspector.detectPeaks}
           </Button>
         </div>
       </section>
@@ -233,6 +254,19 @@ export function Inspector() {
             {t.inspector.normalizationValue}
           </span>
         </Row>
+        <SwitchRow
+          label={t.inspector.showBackground}
+          checked={showBackground && hasBackground}
+          onChange={(v) => {
+            // 背景曲线只在「背景扣除」开启时才由引擎返回。关着的时候把开关
+            // 点亮会毫无变化,用户会以为坏了 —— 明确告诉他先去开背景扣除。
+            if (v && !hasBackground) {
+              showToast("error", t.inspector.needBackgroundFirst);
+              return;
+            }
+            setShowBackground(v);
+          }}
+        />
         <Row label={`${t.inspector.offset}${offset !== 0 ? ` ${offset.toFixed(0)}` : ""}`}>
           <div className="w-28">
             <RangeSlider

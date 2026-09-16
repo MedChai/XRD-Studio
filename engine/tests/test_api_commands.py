@@ -113,6 +113,67 @@ class TestImport:
         need = r["data"]["needColumns"][0]
         assert need["previewRows"]
 
+    def test_column_mapping_roundtrip(self, engine, tmp_path):
+        """列映射的两次调用序列(前端 ImportSheet 走的就是这条)。
+
+        第一次不带列信息 → 引擎返回 needColumns,并且**已经把 sample 建好了**
+        并在返回体里给出 sampleId;第二次带 x_column/y_column + 那个 sample_id
+        → 应当导入成功,且复用同一个 sample。
+
+        这条契约是前端 B2 修复的依据:前端必须在处理 needColumns 之前就把
+        sampleId 存下来,否则第二次调用发 sample_id=None 且没有 new_sample,
+        引擎只能报「新样品必须填写 Sample Name」。
+
+        这里用临时文件而不是 fixtures/ 里的现成文件:现有那几个「需要列映射」
+        的 fixture(european.txt / unparseable.txt / single_column.txt)在解析
+        层面就已经失败,列映射也救不回来,无法用来验往返。10 列文件走的是
+        「列数超过 MAX_AUTO_COLUMNS 所以不猜列」这条路径,是唯一能真正往返的
+        列映射场景。
+        """
+        pid = engine.handle("projects.create", {"name": "P"})["data"]["projectId"]
+
+        path = tmp_path / "ten_columns.txt"
+        lines = ["# 2theta  intensity  c3 c4 c5 c6 c7 c8 c9 c10"]
+        for i in range(200):
+            x = 10.0 + i * 0.05
+            y = 1000.0 + 500.0 * ((i * 37) % 100) / 100.0
+            lines.append(f"{x:.3f} {y:.1f} 1 2 3 4 5 6 7 8")
+        path.write_text(chr(10).join(lines), encoding="utf-8")
+
+        first = engine.handle("datasets.import", {
+            "paths": [str(path)], "project_id": pid,
+            "new_sample": {"name": "S"},
+        })
+        assert first["ok"], first
+        assert len(first["data"]["needColumns"]) == 1, first["data"]
+        # 关键:第一次调用就要给出 sampleId,前端才有东西可回填
+        sample_id = first["data"]["sampleId"]
+        assert sample_id is not None
+
+        second = engine.handle("datasets.import", {
+            "paths": [str(path)], "project_id": pid,
+            "sample_id": sample_id,
+            "x_column": 0, "y_column": 1,
+        })
+        assert second["ok"], second
+        assert len(second["data"]["imported"]) == 1, second["data"]
+        # 复用同一个 sample,不再新建
+        assert second["data"]["sampleId"] == sample_id
+
+    def test_mapping_without_sample_is_rejected(self, engine, fixtures_dir):
+        """反向确认:第二次调用若丢了 sample_id 又不给 new_sample,必须报错
+        (这正是修复前前端必然踩到的坑)。"""
+        pid = engine.handle("projects.create", {"name": "P"})["data"]["projectId"]
+        path = fixtures_dir / "single_column.txt"
+        if not path.exists():
+            pytest.skip("fixture 未生成")
+        r = engine.handle("datasets.import", {
+            "paths": [str(path)], "project_id": pid,
+            "x_column": 0, "y_column": 1,
+        })
+        assert not r["ok"]
+        assert "Sample" in r["error"]
+
 
 class TestCurveAndPreview:
     def test_curve_roundtrip(self, with_dataset):

@@ -76,8 +76,21 @@ function fakeLfpCurve(offset = 0, scale = 1): CurvePayload {
   };
 }
 
-function fakePeaks(curve: CurvePayload, sensitivity: string): PeakResult[] {
+/** 模拟 AsLS 背景:一条随角度缓慢衰减的基线。
+ *
+ * mock 必须在这里返回背景曲线 —— 真实引擎只在 background.enabled 时返回
+ * 它,前端「显示背景」开关依赖这个数组是否存在。mock 不返回的话,这个开关
+ * 在纯浏览器下永远无法验证(点了只会弹「请先启用背景扣除」)。 */
+function fakeBackground(curve: CurvePayload): number[] {
   const { x, y } = curve;
+  const minY = Math.min(...y);
+  return x.map((xi, i) => {
+    const decay = 900 * Math.exp(-(xi - 10) / 14);
+    return Math.max(0, Math.min(y[i] - 1, minY + decay));
+  });
+}
+
+function fakePeaks(curve: CurvePayload, sensitivity: string): PeakResult[] {  const { x, y } = curve;
   const range = Math.max(...y) - Math.min(...y);
   const factor = sensitivity === "high" ? 0.015 : sensitivity === "low" ? 0.15 : 0.05;
   const threshold = range * factor;
@@ -140,13 +153,19 @@ async function mockCommand(
       const pipeline = (payload.pipeline ?? {}) as {
         peaks?: { sensitivity?: string };
         smoothing?: { enabled?: boolean };
+        background?: { enabled?: boolean };
       };
       const peaks = fakePeaks(
         mockCurveCache,
         pipeline.peaks?.sensitivity ?? "medium",
       );
+      const bgOn = !!pipeline.background?.enabled;
+      // 与引擎一致:只在 background.enabled 时返回 background 数组
+      const curve: CurvePayload = bgOn
+        ? { ...mockCurveCache, background: fakeBackground(mockCurveCache) }
+        : mockCurveCache;
       return ok({
-        curve: mockCurveCache,
+        curve,
         peaks,
         smoothingAffectsMetrics: !!pipeline.smoothing?.enabled,
         warnings: [],

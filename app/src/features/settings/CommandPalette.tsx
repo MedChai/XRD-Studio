@@ -5,6 +5,7 @@ import * as Dialog from "@radix-ui/react-dialog";
 import {
   Download,
   FolderPlus,
+  Maximize2,
   Moon,
   Pencil,
   Search,
@@ -13,7 +14,13 @@ import {
   Upload,
   Wand2,
 } from "lucide-react";
-import { useAnalysisStore, useAppStore, useProjectStore, useUiStore } from "../../stores";
+import {
+  useAnalysisStore,
+  useAppStore,
+  usePlotStore,
+  useProjectStore,
+  useUiStore,
+} from "../../stores";
 import { useSelectionStore } from "../../stores";
 import { t } from "../../i18n";
 
@@ -49,6 +56,7 @@ export function CommandPalette() {
       { id: "import", label: t.command.importData, icon: <Upload size={14} />, group: t.command.groupCommands, run: () => useUiStore.getState().setImportOpen(true) },
       { id: "newProject", label: t.command.newProject, icon: <FolderPlus size={14} />, group: t.command.groupCommands, run: () => useUiStore.getState().setNewProjectOpen(true) },
       { id: "detect", label: t.command.detectPeaks, icon: <Wand2 size={14} />, group: t.command.groupCommands, run: () => useAnalysisStore.getState().patchPipeline({}) },
+      { id: "fitAll", label: t.command.fitAll, icon: <Maximize2 size={14} />, group: t.command.groupCommands, run: () => usePlotStore.getState().fitAll() },
       { id: "export", label: t.command.exportPeaks, icon: <Download size={14} />, group: t.command.groupCommands, run: () => useUiStore.getState().showToast("success", t.command.exportPending) },
       {
         id: "renameDataset",

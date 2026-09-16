@@ -239,24 +239,54 @@ interface PlotState {
   offset: number;
   /** 光标处的数据坐标(状态栏显示,§15 草图) */
   cursor: { x: number; y: number } | null;
+  /** 当前曲线的完整 x 值域,作为 Fit All 与底部范围框的共同基准。
+   * 由 loadDataset 成功后写入 —— 不能从 XRDChart 内部推,因为底部范围框
+   * 也需要它。 */
+  xDomain: [number, number] | null;
+  /** 缩放窗口(§10.2:plotStore 持有缩放窗口)。
+   *
+   * **用数据坐标(2θ)而不是百分比**:百分比是相对于当前曲线值域的,
+   * 切换数据集后旧的百分比会落在新曲线的错误位置上,表现为"图是空的"
+   * 且极难排查。数据坐标跨曲线切换是无歧义的。
+   *
+   * null 表示"全域"(未缩放)。 */
+  zoom: { from: number; to: number } | null;
+  /** 是否叠加显示背景曲线(§7.3 的 Show Background) */
+  showBackground: boolean;
   setMode: (m: PlotState["mode"]) => void;
   setCrosshair: (v: boolean) => void;
   setShowLabels: (v: boolean) => void;
   setOffset: (v: number) => void;
   setCursor: (c: PlotState["cursor"]) => void;
+  setXDomain: (d: PlotState["xDomain"]) => void;
+  setZoom: (z: PlotState["zoom"]) => void;
+  setShowBackground: (v: boolean) => void;
+  /** Fit All:把缩放窗口设回全域。zoom 是唯一真相,两个图都订阅它自动跟随,
+   * 所以不需要额外的"请求序号"来通知谁去执行。 */
+  fitAll: () => void;
 }
 
-export const usePlotStore = create<PlotState>((set) => ({
+export const usePlotStore = create<PlotState>((set, get) => ({
   mode: "overlay",
   crosshair: false,
   showLabels: true,
   offset: 0,
   cursor: null,
+  xDomain: null,
+  zoom: null,
+  showBackground: false,
   setMode: (mode) => set({ mode }),
   setCrosshair: (crosshair) => set({ crosshair }),
   setShowLabels: (showLabels) => set({ showLabels }),
   setOffset: (offset) => set({ offset }),
   setCursor: (cursor) => set({ cursor }),
+  setXDomain: (xDomain) => set({ xDomain }),
+  setZoom: (zoom) => set({ zoom }),
+  setShowBackground: (showBackground) => set({ showBackground }),
+  fitAll: () => {
+    const d = get().xDomain;
+    if (d) set({ zoom: { from: d[0], to: d[1] } });
+  },
 }));
 
 // ---------------- analysisStore ----------------
@@ -272,6 +302,10 @@ interface AnalysisState {
   undoStack: PipelineParams[];
   redoStack: PipelineParams[];
   loadedDatasetId: number | null;
+  /** 峰是否与磁盘上的 peaks 表一致。patchPipeline 会把它置 true(参数变了,
+   * 内存里的峰已经不是固化过的那批),peaks.detect 成功后置 false。
+   * 没有这个标记,用户点完「检测峰」看不出到底有没有生效。 */
+  peaksDirty: boolean;
   /** 滑块拖动节流:cancel 旧请求语义由序号丢弃实现 */
   _previewSeq: number;
   _commitTimer: number | null;
@@ -280,6 +314,8 @@ interface AnalysisState {
   /** 清空当前曲线与峰(数据集被删除时用) */
   clearDataset: () => void;
   patchPipeline: (patch: Partial<PipelineParams>) => void;
+  /** peaks.detect 成功后调用:把固化后的峰写回并清 dirty */
+  markPeaksCommitted: (peaks: PeakResult[]) => void;
   undo: () => void;
   redo: () => void;
 }
@@ -295,6 +331,7 @@ export const useAnalysisStore = create<AnalysisState>((set, get) => ({
   undoStack: [],
   redoStack: [],
   loadedDatasetId: null,
+  peaksDirty: false,
   _previewSeq: 0,
   _commitTimer: null,
 
@@ -307,8 +344,15 @@ export const useAnalysisStore = create<AnalysisState>((set, get) => ({
         curve: r.data,
         loadedDatasetId: datasetId,
         peaks: [],
+        peaksDirty: false,
         status: "idle",
       });
+      // 新曲线的值域 + 清空缩放窗口。**不清 zoom 会残留上一条曲线的 2θ
+      // 窗口**,切到值域不同的曲线时表现为一张空图。
+      // 用首尾点而非 Math.min(...x):15k 点展开成参数会爆栈;曲线保证升序。
+      const x = r.data.x;
+      usePlotStore.getState().setXDomain(x.length ? [x[0], x[x.length - 1]] : null);
+      usePlotStore.getState().setZoom(null);
       // 载入即做一次默认寻峰预览
       get().patchPipeline({});
     } else {
@@ -321,12 +365,17 @@ export const useAnalysisStore = create<AnalysisState>((set, get) => ({
       curve: null,
       peaks: [],
       loadedDatasetId: null,
+      peaksDirty: false,
       status: "idle",
       smoothingAffectsMetrics: false,
       undoStack: [],
       redoStack: [],
     });
+    usePlotStore.getState().setXDomain(null);
+    usePlotStore.getState().setZoom(null);
   },
+
+  markPeaksCommitted: (peaks) => set({ peaks, peaksDirty: false }),
 
   patchPipeline: (patch) => {
     const s = get();
@@ -334,6 +383,8 @@ export const useAnalysisStore = create<AnalysisState>((set, get) => ({
     set((st) => ({
       pipeline: next,
       status: "previewing",
+      // 参数变了 → 内存里的峰已不是固化过的那批
+      peaksDirty: true,
       undoStack: [...st.undoStack.slice(-49), st.pipeline],
       redoStack: [],
     }));

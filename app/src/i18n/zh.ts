@@ -92,6 +92,8 @@ export const t = {
     saved: "已保存",
     saving: "保存中…",
     computing: "计算中…",
+    /** 峰参数改过但还没点「检测峰」固化 */
+    peaksDirty: "峰未固化",
     points: (n: string) => `${n} 点`,
   },
 
@@ -103,6 +105,7 @@ export const t = {
     stacked: "堆叠",
     crosshair: "十字光标",
     toggleMode: "叠加模式切换",
+    fitAll: "适应全部(双击图表 / Ctrl+0)",
   },
 
   inspector: {
@@ -126,6 +129,7 @@ export const t = {
     width: "峰宽",
     labels: "峰标签",
     detectPeaks: "检测峰",
+    detecting: "检测中…",
     detectUpdated: "峰检测已更新",
     detected: (n: number) => `已检测到 ${n} 个峰并保存`,
     display: "显示",
@@ -172,12 +176,18 @@ export const t = {
     done: "完成",
     duplicate: (project: string, sample: string, dataset: string) =>
       `重复数据:${project} / ${sample} / ${dataset}`,
+    duplicateTitle: "发现重复文件",
+    duplicateHint: (n: number) =>
+      `有 ${n} 个文件此前已导入过。可以打开已有数据,或仍然导入一份副本。`,
+    openExisting: "打开已有",
+    importAnyway: "仍然导入",
   },
 
   command: {
     importData: "导入 XRD 数据",
     newProject: "新建项目",
     detectPeaks: "检测峰",
+    fitAll: "适应全部(回到全局视图)",
     exportPeaks: "导出峰表 (CSV)",
     exportPending: "导出功能在 Milestone 5 落地",
     switchToLight: "切换浅色模式",

@@ -10,7 +10,7 @@ import * as Dialog from "@radix-ui/react-dialog";
 import { Button } from "../../components/controls";
 import { engineCommand } from "../../services/engine";
 import type { ImportResult } from "../../types/engine";
-import { useProjectStore, useUiStore } from "../../stores";
+import { useProjectStore, useUiStore, useSelectionStore, useAnalysisStore } from "../../stores";
 import { cn } from "../../components/cn";
 import { t } from "../../i18n";
 
@@ -31,6 +31,14 @@ export function ImportSheet() {
   const [mapping, setMapping] = useState<ImportResult["needColumns"][0] | null>(null);
   const [mapX, setMapX] = useState(1);
   const [mapY, setMapY] = useState(2);
+  /** 列映射往返时归属的 sample。
+   * **必须存在组件局部 state**:引擎在返回 needColumns 的同时已经把 sample
+   * 建好了,第二次调用要复用它。只依赖 uiStore.lastSampleId 的话,中间用户
+   * 切了样品就会串到别的样品上。 */
+  const [mappingSampleId, setMappingSampleId] = useState<number | null>(null);
+  /** 重复文件的待决态。非 null 时显示确认区块,让用户选「打开已有」或
+   * 「仍然导入」—— 而不是像以前那样直接中止整个导入。 */
+  const [duplicates, setDuplicates] = useState<ImportResult["duplicates"] | null>(null);
 
   const project = projectId ?? currentProjectId ?? projects[0]?.id ?? null;
 
@@ -62,7 +70,11 @@ export function ImportSheet() {
     }
   }
 
-  async function runImport(xColumn?: number, yColumn?: number) {
+  async function runImport(
+    xColumn?: number,
+    yColumn?: number,
+    importAnyway = false,
+  ) {
     if (!paths.length) return;
     if (project == null) {
       // 空 Library 的第一步:先建项目,避免静默失败
@@ -76,8 +88,13 @@ export function ImportSheet() {
       paths,
       project_id: project,
       ...(mapping
-        ? { x_column: (xColumn ?? mapX) - 1, y_column: (yColumn ?? mapY) - 1, sample_id: useUiStore.getState().lastSampleId }
-        : { new_sample: { name: newSampleName || "New Sample" } }),
+        ? {
+            x_column: (xColumn ?? mapX) - 1,
+            y_column: (yColumn ?? mapY) - 1,
+            sample_id: mappingSampleId ?? useUiStore.getState().lastSampleId,
+          }
+        : { new_sample: { name: newSampleName || "新样品" } }),
+      ...(importAnyway ? { import_anyway: true } : {}),
     });
     setBusy(false);
     if (!r.ok) {
@@ -85,25 +102,24 @@ export function ImportSheet() {
       return;
     }
     const d = r.data;
+    // **先回填 sampleId,再做任何早返回**。此前这一步在 needColumns 的
+    // return 之后,导致第二次(带列映射的)调用发 sample_id: null 且没有
+    // new_sample,引擎必然报「新样品必须填写 Sample Name」—— 凡是需要手选
+    // 列的 CSV 都导不进来。
+    useUiStore.getState().setLastSampleId(d.sampleId);
+    setMappingSampleId(d.sampleId);
+
     if (d.needColumns.length > 0 && !mapping) {
       setMapping(d.needColumns[0]);
       setMapX(d.needColumns[0].suggestedX + 1);
       setMapY(d.needColumns[0].suggestedY + 1);
       return;
     }
-    if (d.duplicates.length > 0) {
-      const dup = d.duplicates[0];
-      showToast(
-        "error",
-        t.import.duplicate(
-          dup.existing.projectName,
-          dup.existing.sampleName,
-          dup.existing.datasetName,
-        ),
-      );
+    // 重复文件进入待决态:不中止,交给用户选「打开已有」或「仍然导入」
+    if (d.duplicates.length > 0 && !importAnyway) {
+      setDuplicates(d.duplicates);
       return;
     }
-    useUiStore.getState().setLastSampleId(d.sampleId);
     const parts: string[] = [];
     if (d.imported.length) parts.push(t.import.imported(d.imported.length));
     if (d.failures.length) parts.push(t.import.failed(d.failures.length));
@@ -112,9 +128,19 @@ export function ImportSheet() {
       setPaths([]);
       setNewSampleName("");
       setMapping(null);
+      setMappingSampleId(null);
+      setDuplicates(null);
       setOpen(false);
       void load();
     }
+  }
+
+  /** 「打开已有」:把重复项对应的那个 dataset 选出来直接看。 */
+  function openExisting(datasetId: number) {
+    useSelectionStore.getState().selectDataset(null, datasetId);
+    void useAnalysisStore.getState().loadDataset(datasetId);
+    setDuplicates(null);
+    setOpen(false);
   }
 
   return (
@@ -123,10 +149,43 @@ export function ImportSheet() {
         <Dialog.Overlay className="fixed inset-0 z-40 bg-black/25 backdrop-blur-[2px]" />
         <Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-[460px] -translate-x-1/2 -translate-y-1/2 rounded-[var(--radius-dialog)] bg-[var(--bg-panel)] p-5 shadow-[var(--shadow-dialog)]">
           <Dialog.Title className="text-[17px] font-semibold">
-            {mapping ? t.import.mappingTitle : t.import.title}
+            {duplicates
+              ? t.import.duplicateTitle
+              : mapping
+                ? t.import.mappingTitle
+                : t.import.title}
           </Dialog.Title>
 
-          {!mapping ? (
+          {duplicates ? (
+            <div className="mt-4">
+              <div className="text-[12px] text-[var(--text-secondary)]">
+                {t.import.duplicateHint(duplicates.length)}
+              </div>
+              <div className="mt-2 max-h-40 overflow-auto rounded-[var(--radius-panel)] border border-[var(--divider)]">
+                {duplicates.map((d) => (
+                  <div
+                    key={d.path}
+                    className="flex items-center gap-2 border-b border-[var(--divider)] px-2.5 py-2 last:border-0"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-[12px] text-[var(--text-primary)]">
+                        {d.existing.datasetName}
+                      </div>
+                      <div className="truncate text-[11px] text-[var(--text-tertiary)]">
+                        {d.existing.projectName} / {d.existing.sampleName}
+                      </div>
+                    </div>
+                    <Button
+                      kind="ghost"
+                      onClick={() => openExisting(d.existing.datasetId)}
+                    >
+                      {t.import.openExisting}
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : !mapping ? (
             <div className="mt-4 flex flex-col gap-3">
               <button
                 type="button"
@@ -237,16 +296,36 @@ export function ImportSheet() {
           )}
 
           <div className="mt-5 flex justify-end gap-2">
-            <Button kind="ghost" onClick={() => setOpen(false)}>
-              {t.import.cancel}
-            </Button>
-            <Button
-              kind="primary"
-              disabled={busy || paths.length === 0}
-              onClick={() => void runImport()}
-            >
-              {busy ? t.import.importing : t.import.import}
-            </Button>
+            {duplicates ? (
+              <>
+                <Button kind="ghost" onClick={() => setDuplicates(null)}>
+                  {t.import.cancel}
+                </Button>
+                <Button
+                  kind="primary"
+                  disabled={busy}
+                  onClick={() => {
+                    setDuplicates(null);
+                    void runImport(undefined, undefined, true);
+                  }}
+                >
+                  {busy ? t.import.importing : t.import.importAnyway}
+                </Button>
+              </>
+            ) : (
+              <>
+                <Button kind="ghost" onClick={() => setOpen(false)}>
+                  {t.import.cancel}
+                </Button>
+                <Button
+                  kind="primary"
+                  disabled={busy || paths.length === 0}
+                  onClick={() => void runImport()}
+                >
+                  {busy ? t.import.importing : t.import.import}
+                </Button>
+              </>
+            )}
           </div>
         </Dialog.Content>
       </Dialog.Portal>
