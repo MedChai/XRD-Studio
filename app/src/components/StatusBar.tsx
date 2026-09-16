@@ -1,6 +1,7 @@
 /** 状态栏(§15):光标读数、点数、保存状态。 */
 
 import { useAnalysisStore, usePlotStore } from "../stores";
+import { t } from "../i18n";
 
 export function StatusBar() {
   const curve = useAnalysisStore((s) => s.curve);
@@ -22,9 +23,15 @@ export function StatusBar() {
         <span>—</span>
       )}
       <span className="flex-1" />
-      {curve && <span className="tabular">{curve.pointCount.toLocaleString()} pts</span>}
+      {curve && (
+        <span className="tabular">{t.status.points(curve.pointCount.toLocaleString())}</span>
+      )}
       <span className={status === "idle" ? "text-[var(--success)]" : "text-[var(--warning)]"}>
-        {status === "idle" ? "Saved" : status === "committing" ? "Saving…" : "Computing…"}
+        {status === "idle"
+          ? t.status.saved
+          : status === "committing"
+            ? t.status.saving
+            : t.status.computing}
       </span>
     </footer>
   );

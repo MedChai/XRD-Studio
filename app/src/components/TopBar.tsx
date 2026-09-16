@@ -4,6 +4,7 @@ import { Plus, Search, Settings } from "lucide-react";
 import { Button, IconButton } from "../components/controls";
 import { ProjectSwitcher } from "./ProjectSwitcher";
 import { useUiStore } from "../stores";
+import { t } from "../i18n";
 
 export function TopBar() {
   const { setImportOpen, setPaletteOpen, setSettingsOpen } = useUiStore();
@@ -14,18 +15,18 @@ export function TopBar() {
       style={{ height: "var(--topbar-h)" }}
     >
       <span className="text-[13px] font-semibold text-[var(--text-primary)]">
-        XRD Studio
+        {t.app.name}
       </span>
       <ProjectSwitcher />
       <div className="flex-1" />
-      <IconButton title="搜索 (Ctrl+K)" onClick={() => setPaletteOpen(true)}>
+      <IconButton title={t.topbar.search} onClick={() => setPaletteOpen(true)}>
         <Search size={16} />
       </IconButton>
-      <IconButton title="设置" onClick={() => setSettingsOpen(true)}>
+      <IconButton title={t.topbar.settings} onClick={() => setSettingsOpen(true)}>
         <Settings size={16} />
       </IconButton>
       <Button kind="primary" onClick={() => setImportOpen(true)}>
-        <Plus size={14} /> Import
+        <Plus size={14} /> {t.topbar.import}
       </Button>
     </header>
   );

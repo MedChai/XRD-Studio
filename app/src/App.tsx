@@ -27,6 +27,7 @@ import {
   useUiStore,
 } from "./stores";
 import { Button } from "./components/controls";
+import { t } from "./i18n";
 
 const isTauri = "__TAURI_INTERNALS__" in window;
 
@@ -143,14 +144,14 @@ function EmptyState() {
   const setImportOpen = useUiStore((s) => s.setImportOpen);
   return (
     <div className="flex h-full flex-col items-center justify-center gap-5">
-      <div className="text-[22px] font-semibold text-[var(--text-primary)]">XRD Studio</div>
+      <div className="text-[22px] font-semibold text-[var(--text-primary)]">{t.app.name}</div>
       <div className="text-[13px] text-[var(--text-secondary)]">
-        拖入衍射数据文件开始分析
+        {t.empty.hint}
       </div>
       <Button kind="primary" onClick={() => setImportOpen(true)}>
-        Import XRD Data
+        {t.empty.importButton}
       </Button>
-      <div className="text-[11px] text-[var(--text-tertiary)]">CSV · TXT · XY · DAT</div>
+      <div className="text-[11px] text-[var(--text-tertiary)]">{t.import.formats}</div>
     </div>
   );
 }
@@ -159,8 +160,8 @@ function EmptyState() {
 function DropOverlay() {
   return (
     <div className="absolute inset-2 z-30 flex flex-col items-center justify-center rounded-[var(--radius-panel)] border-2 border-dashed border-[var(--accent)] bg-[color-mix(in_srgb,var(--accent)_8%,transparent)]">
-      <div className="text-[15px] font-medium text-[var(--accent)]">Drop XRD Data</div>
-      <div className="mt-1 text-[12px] text-[var(--text-secondary)]">CSV · TXT · XY · DAT</div>
+      <div className="text-[15px] font-medium text-[var(--accent)]">{t.empty.dropHere}</div>
+      <div className="mt-1 text-[12px] text-[var(--text-secondary)]">{t.import.formats}</div>
     </div>
   );
 }

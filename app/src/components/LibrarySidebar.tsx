@@ -4,6 +4,7 @@ import { useState } from "react";
 import { ChevronDown, ChevronRight, Plus } from "lucide-react";
 import { useProjectStore, useSelectionStore, useAnalysisStore, useUiStore } from "../stores";
 import { cn } from "./cn";
+import { t } from "../i18n";
 
 export function LibrarySidebar() {
   const { samples, projects } = useProjectStore();
@@ -28,7 +29,7 @@ export function LibrarySidebar() {
       style={{ width: "var(--sidebar-w)" }}
     >
       <div className="px-3 pt-3 pb-1 text-[11px] font-semibold uppercase tracking-wide text-[var(--text-tertiary)]">
-        Library
+        {t.library.title}
       </div>
       <div className="px-3 pb-2">
         <div className="flex items-center gap-1.5 rounded-[var(--radius-input)] border border-[var(--divider)] bg-[var(--bg-panel)] px-2 py-1">
@@ -36,7 +37,7 @@ export function LibrarySidebar() {
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search"
+            placeholder={t.library.search}
             className="w-full bg-transparent text-[12px] text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] focus:outline-none"
           />
         </div>
@@ -65,7 +66,7 @@ export function LibrarySidebar() {
         ))}
         {samples.length === 0 && (
           <div className="px-4 py-6 text-[12px] text-[var(--text-tertiary)]">
-            还没有样品。点击 Import 开始。
+            {t.library.empty}
           </div>
         )}
       </div>
@@ -75,13 +76,13 @@ export function LibrarySidebar() {
           className="tr flex items-center gap-1.5 px-4 py-1.5 text-[12px] text-[var(--text-secondary)] hover:bg-[var(--hover)] hover:text-[var(--text-primary)]"
           onClick={() => useUiStore.getState().setNewProjectOpen(true)}
         >
-          <Plus size={13} /> New Project
+          <Plus size={13} /> {t.library.newProject}
         </button>
         <button
           className="tr flex items-center gap-1.5 px-4 py-1.5 text-[12px] text-[var(--text-secondary)] hover:bg-[var(--hover)] hover:text-[var(--text-primary)]"
           onClick={() => setImportOpen(true)}
         >
-          <Plus size={13} /> Import / New Sample
+          <Plus size={13} /> {t.library.importNewSample}
         </button>
       </div>
     </aside>

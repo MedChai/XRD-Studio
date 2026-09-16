@@ -14,6 +14,7 @@ import { RangeSlider } from "../../components/Slider";
 import { useAnalysisStore, usePlotStore, useUiStore } from "../../stores";
 import { engineCommand } from "../../services/engine";
 import { cn } from "../../components/cn";
+import { t } from "../../i18n";
 
 export function Inspector() {
   const pipeline = useAnalysisStore((s) => s.pipeline);
@@ -23,7 +24,9 @@ export function Inspector() {
   const loadedDatasetId = useAnalysisStore((s) => s.loadedDatasetId);
   const { offset, setOffset, showLabels, setShowLabels } = usePlotStore();
   const [advanced, setAdvanced] = useState(false);
-  const { showToast } = useUiStore();
+  // 选择器订阅:不要用 useUiStore() 全量解构 —— uiStore 里的 toast 计时器
+  // 每次变化都会重渲染整个 Inspector
+  const showToast = useUiStore((s) => s.showToast);
 
   const bg = pipeline.background;
   const sm = pipeline.smoothing;
@@ -36,16 +39,16 @@ export function Inspector() {
     >
       {/* ---------------- PROCESSING ---------------- */}
       <section>
-        <SectionHeader>Processing</SectionHeader>
+        <SectionHeader>{t.inspector.processing}</SectionHeader>
 
         <SwitchRow
-          label="Background"
+          label={t.inspector.background}
           checked={bg.enabled}
           onChange={(v) => patch({ background: { ...bg, enabled: v } })}
         />
         {bg.enabled && (
           <>
-            <Row label="Method">
+            <Row label={t.inspector.method}>
               <Segmented
                 options={[
                   { value: "asls", label: "AsLS" },
@@ -58,7 +61,7 @@ export function Inspector() {
             {bg.method === "asls" ? (
               <>
                 {/* §7.3:λ 用 log2 刻度,禁止裸输入 */}
-                <Row label="Smoothness">
+                <Row label={t.inspector.smoothness}>
                   <span className="tabular text-[12px] font-medium">
                     10^{Math.round(Math.log10(bg.smoothness))}
                   </span>
@@ -76,7 +79,7 @@ export function Inspector() {
                     }
                   />
                 </div>
-                <Row label="Asymmetry">
+                <Row label={t.inspector.asymmetry}>
                   <NumberField
                     value={bg.asymmetry}
                     min={0.0001}
@@ -87,7 +90,7 @@ export function Inspector() {
                 </Row>
               </>
             ) : (
-              <Row label="Order">
+              <Row label={t.inspector.order}>
                 <NumberField
                   value={bg.order}
                   min={1}
@@ -101,7 +104,7 @@ export function Inspector() {
         )}
 
         <SwitchRow
-          label="Smoothing"
+          label={t.inspector.smoothing}
           checked={sm.enabled}
           onChange={(v) =>
             patch({ smoothing: { ...sm, enabled: v } })
@@ -109,7 +112,7 @@ export function Inspector() {
         />
         {sm.enabled && (
           <>
-            <Row label="Window">
+            <Row label={t.inspector.window}>
               <span className="tabular text-[12px] font-medium">{sm.window_length}</span>
             </Row>
             <div className="flex items-center gap-2 px-3 py-1">
@@ -125,7 +128,7 @@ export function Inspector() {
             </div>
             {smoothingAffects && (
               <div className="mx-3 my-1 rounded-[var(--radius-control)] bg-[color-mix(in_srgb,var(--warning)_14%,transparent)] px-2 py-1.5 text-[11px] text-[var(--text-secondary)]">
-                ⚠ 当前 FWHM / Area 在平滑后曲线上计算
+                {t.inspector.smoothingWarning}
               </div>
             )}
           </>
@@ -134,19 +137,19 @@ export function Inspector() {
 
       {/* ---------------- PEAKS ---------------- */}
       <section className="border-t border-[var(--divider)] pt-1">
-        <SectionHeader>Peaks</SectionHeader>
-        <Row label="Sensitivity">
+        <SectionHeader>{t.inspector.peaks}</SectionHeader>
+        <Row label={t.inspector.sensitivity}>
           <Segmented
             options={[
-              { value: "low", label: "Low" },
-              { value: "medium", label: "Med" },
-              { value: "high", label: "High" },
+              { value: "low", label: t.inspector.sensitivityLow },
+              { value: "medium", label: t.inspector.sensitivityMed },
+              { value: "high", label: t.inspector.sensitivityHigh },
             ]}
             value={pk.sensitivity}
             onChange={(v) => patch({ peaks: { ...pk, sensitivity: v } })}
           />
         </Row>
-        <Row label="Min Height">
+        <Row label={t.inspector.minHeight}>
           <NumberField
             value={pk.min_height_pct}
             min={0}
@@ -155,7 +158,7 @@ export function Inspector() {
             onChange={(v) => patch({ peaks: { ...pk, min_height_pct: v } })}
           />
         </Row>
-        <Row label="Min Distance">
+        <Row label={t.inspector.minDistance}>
           <NumberField
             value={pk.min_distance_deg}
             min={0.01}
@@ -173,11 +176,11 @@ export function Inspector() {
             size={12}
             className={cn("transition-transform", !advanced && "-rotate-90")}
           />
-          Advanced
+          {t.inspector.advanced}
         </button>
         {advanced && (
           <>
-            <Row label="Prominence">
+            <Row label={t.inspector.prominence}>
               <NumberField
                 value={pk.prominence ?? 0}
                 onChange={(v) =>
@@ -185,7 +188,7 @@ export function Inspector() {
                 }
               />
             </Row>
-            <Row label="Width">
+            <Row label={t.inspector.width}>
               <NumberField
                 value={pk.width ?? 0}
                 onChange={(v) => patch({ peaks: { ...pk, width: v > 0 ? v : null } })}
@@ -194,7 +197,7 @@ export function Inspector() {
           </>
         )}
 
-        <Row label="Labels">
+        <Row label={t.inspector.labels}>
           <input
             type="checkbox"
             checked={showLabels}
@@ -214,21 +217,23 @@ export function Inspector() {
                 dataset_id: loadedDatasetId,
                 pipeline: analyses.pipeline,
               });
-              showToast("success", "峰检测已更新");
+              showToast("success", t.inspector.detectUpdated);
             }}
           >
-            Detect Peaks
+            {t.inspector.detectPeaks}
           </Button>
         </div>
       </section>
 
       {/* ---------------- DISPLAY ---------------- */}
       <section className="border-t border-[var(--divider)] pt-1">
-        <SectionHeader>Display</SectionHeader>
-        <Row label="Normalization">
-          <span className="text-[12px] text-[var(--text-tertiary)]">Max = 100</span>
+        <SectionHeader>{t.inspector.display}</SectionHeader>
+        <Row label={t.inspector.normalization}>
+          <span className="text-[12px] text-[var(--text-tertiary)]">
+            {t.inspector.normalizationValue}
+          </span>
         </Row>
-        <Row label={`Offset${offset !== 0 ? ` ${offset.toFixed(0)}` : ""}`}>
+        <Row label={`${t.inspector.offset}${offset !== 0 ? ` ${offset.toFixed(0)}` : ""}`}>
           <div className="w-28">
             <RangeSlider
               className="w-full"
@@ -244,12 +249,12 @@ export function Inspector() {
 
       <div className="mt-auto px-3 pt-2 text-[11px] text-[var(--text-tertiary)]">
         {status === "previewing"
-          ? "计算中…"
+          ? t.inspector.statusPreviewing
           : status === "committing"
-            ? "保存中…"
+            ? t.inspector.statusCommitting
             : loadedDatasetId
-              ? "已保存"
-              : "选择左侧样品开始"}
+              ? t.inspector.statusSaved
+              : t.inspector.statusNoDataset}
       </div>
     </aside>
   );

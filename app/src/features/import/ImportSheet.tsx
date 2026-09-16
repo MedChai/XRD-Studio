@@ -12,6 +12,7 @@ import { engineCommand } from "../../services/engine";
 import type { ImportResult } from "../../types/engine";
 import { useProjectStore, useUiStore } from "../../stores";
 import { cn } from "../../components/cn";
+import { t } from "../../i18n";
 
 const isTauri = "__TAURI_INTERNALS__" in window;
 
@@ -65,7 +66,7 @@ export function ImportSheet() {
     if (!paths.length) return;
     if (project == null) {
       // 空 Library 的第一步:先建项目,避免静默失败
-      showToast("error", "请先创建项目");
+      showToast("error", t.import.needProject);
       setOpen(false);
       useUiStore.getState().setNewProjectOpen(true);
       return;
@@ -94,15 +95,19 @@ export function ImportSheet() {
       const dup = d.duplicates[0];
       showToast(
         "error",
-        `重复数据：${dup.existing.projectName} / ${dup.existing.sampleName} / ${dup.existing.datasetName}`,
+        t.import.duplicate(
+          dup.existing.projectName,
+          dup.existing.sampleName,
+          dup.existing.datasetName,
+        ),
       );
       return;
     }
     useUiStore.getState().setLastSampleId(d.sampleId);
     const parts: string[] = [];
-    if (d.imported.length) parts.push(`导入 ${d.imported.length} 个数据集`);
-    if (d.failures.length) parts.push(`${d.failures.length} 个文件无法读取`);
-    showToast("success", parts.join(" · ") || "完成");
+    if (d.imported.length) parts.push(t.import.imported(d.imported.length));
+    if (d.failures.length) parts.push(t.import.failed(d.failures.length));
+    showToast("success", parts.join(" · ") || t.import.done);
     if (d.imported.length) {
       setPaths([]);
       setNewSampleName("");
@@ -118,7 +123,7 @@ export function ImportSheet() {
         <Dialog.Overlay className="fixed inset-0 z-40 bg-black/25 backdrop-blur-[2px]" />
         <Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-[460px] -translate-x-1/2 -translate-y-1/2 rounded-[var(--radius-dialog)] bg-[var(--bg-panel)] p-5 shadow-[var(--shadow-dialog)]">
           <Dialog.Title className="text-[17px] font-semibold">
-            {mapping ? "选择数据列" : "Import XRD Data"}
+            {mapping ? t.import.mappingTitle : t.import.title}
           </Dialog.Title>
 
           {!mapping ? (
@@ -136,7 +141,7 @@ export function ImportSheet() {
                     <span className="font-medium">
                       {paths.length === 1
                         ? paths[0].split(/[\\/]/).pop()
-                        : `${paths.length} files`}
+                        : t.import.fileCount(paths.length)}
                     </span>
                     {paths.length > 1 && (
                       <span className="truncate text-[11px]" style={{ maxWidth: 380 }}>
@@ -146,14 +151,14 @@ export function ImportSheet() {
                   </>
                 ) : (
                   <>
-                    <span>点击选择文件</span>
-                    <span>CSV · TXT · XY · DAT</span>
+                    <span>{t.import.pickFile}</span>
+                    <span>{t.import.formats}</span>
                   </>
                 )}
               </button>
 
               <label className="flex items-center justify-between text-[13px] text-[var(--text-secondary)]">
-                Project
+                {t.import.projectLabel}
                 <select
                   value={project ?? ""}
                   onChange={(e) => setProjectId(Number(e.target.value))}
@@ -168,11 +173,11 @@ export function ImportSheet() {
               </label>
 
               <label className="flex items-center justify-between text-[13px] text-[var(--text-secondary)]">
-                New Sample
+                {t.import.newSampleLabel}
                 <input
                   value={newSampleName}
                   onChange={(e) => setNewSampleName(e.target.value)}
-                  placeholder="LFP-500C"
+                  placeholder={t.import.newSamplePlaceholder}
                   className="w-56 rounded-[var(--radius-input)] border border-[var(--divider)] bg-[var(--bg-panel)] px-2 py-1 text-[12px] focus:border-[var(--accent)] focus:outline-none"
                 />
               </label>
@@ -186,7 +191,7 @@ export function ImportSheet() {
                     <tr className="text-left text-[var(--text-tertiary)]">
                       {mapping.previewRows[0]?.map((_, c) => (
                         <th key={c} className="px-2 font-medium">
-                          Col {c + 1}
+                          {t.import.colHeader(c + 1)}
                         </th>
                       ))}
                     </tr>
@@ -206,7 +211,7 @@ export function ImportSheet() {
               </div>
               <div className="mt-3 flex gap-6 text-[13px] text-[var(--text-secondary)]">
                 <label className="flex items-center gap-2">
-                  X Axis
+                  {t.import.xAxis}
                   <input
                     type="number"
                     min={1}
@@ -217,7 +222,7 @@ export function ImportSheet() {
                   />
                 </label>
                 <label className="flex items-center gap-2">
-                  Y Axis
+                  {t.import.yAxis}
                   <input
                     type="number"
                     min={1}
@@ -233,14 +238,14 @@ export function ImportSheet() {
 
           <div className="mt-5 flex justify-end gap-2">
             <Button kind="ghost" onClick={() => setOpen(false)}>
-              Cancel
+              {t.import.cancel}
             </Button>
             <Button
               kind="primary"
               disabled={busy || paths.length === 0}
               onClick={() => void runImport()}
             >
-              {busy ? "导入中…" : "Import"}
+              {busy ? t.import.importing : t.import.import}
             </Button>
           </div>
         </Dialog.Content>

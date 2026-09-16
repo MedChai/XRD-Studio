@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { useAnalysisStore, useAppStore, useProjectStore, useUiStore } from "../../stores";
 import { useSelectionStore } from "../../stores";
+import { t } from "../../i18n";
 
 interface Entry {
   id: string;
@@ -43,22 +44,22 @@ export function CommandPalette() {
 
   const entries = useMemo<Entry[]>(() => {
     const cmds: Entry[] = [
-      { id: "import", label: "Import XRD Data", icon: <Upload size={14} />, group: "命令", run: () => useUiStore.getState().setImportOpen(true) },
-      { id: "newProject", label: "New Project", icon: <FolderPlus size={14} />, group: "命令", run: () => useUiStore.getState().setNewProjectOpen(true) },
-      { id: "detect", label: "Detect Peaks", icon: <Wand2 size={14} />, group: "命令", run: () => useAnalysisStore.getState().patchPipeline({}) },
-      { id: "export", label: "Export Peak Table (CSV)", icon: <Download size={14} />, group: "命令", run: () => useUiStore.getState().showToast("success", "导出功能在 Milestone 5 落地") },
+      { id: "import", label: t.command.importData, icon: <Upload size={14} />, group: t.command.groupCommands, run: () => useUiStore.getState().setImportOpen(true) },
+      { id: "newProject", label: t.command.newProject, icon: <FolderPlus size={14} />, group: t.command.groupCommands, run: () => useUiStore.getState().setNewProjectOpen(true) },
+      { id: "detect", label: t.command.detectPeaks, icon: <Wand2 size={14} />, group: t.command.groupCommands, run: () => useAnalysisStore.getState().patchPipeline({}) },
+      { id: "export", label: t.command.exportPeaks, icon: <Download size={14} />, group: t.command.groupCommands, run: () => useUiStore.getState().showToast("success", t.command.exportPending) },
       {
         id: "theme",
-        label: theme === "dark" ? "切换浅色模式" : "切换深色模式",
+        label: theme === "dark" ? t.command.switchToLight : t.command.switchToDark,
         icon: theme === "dark" ? <Sun size={14} /> : <Moon size={14} />,
-        group: "命令",
+        group: t.command.groupCommands,
         run: () => setTheme(theme === "dark" ? "light" : "dark"),
       },
     ];
     const samples_: Entry[] = samples.map((s) => ({
       id: `s${s.id}`,
       label: s.name,
-      group: "样品",
+      group: t.command.groupSamples,
       run: () => {
         const ds = s.datasets[0];
         if (ds) {
@@ -90,7 +91,7 @@ export function CommandPalette() {
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-40 bg-black/25 backdrop-blur-[2px]" />
         <Dialog.Content className="fixed left-1/2 top-[22%] z-50 w-[460px] -translate-x-1/2 rounded-[var(--radius-dialog)] bg-[var(--bg-elevated)] shadow-[var(--shadow-dialog)] backdrop-blur-2xl">
-          <Dialog.Title className="sr-only">命令面板</Dialog.Title>
+          <Dialog.Title className="sr-only">{t.command.title}</Dialog.Title>
           <div className="flex items-center gap-2 border-b border-[var(--divider)] px-4 py-3">
             <Search size={15} className="text-[var(--text-tertiary)]" />
             <input
@@ -108,7 +109,7 @@ export function CommandPalette() {
                   setOpen(false);
                 }
               }}
-              placeholder="搜索命令或样品…"
+              placeholder={t.command.placeholder}
               className="w-full bg-transparent text-[14px] text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] focus:outline-none"
             />
           </div>
@@ -144,7 +145,7 @@ export function CommandPalette() {
             ))}
             {filtered.length === 0 && (
               <div className="px-4 py-6 text-center text-[12px] text-[var(--text-tertiary)]">
-                无匹配结果
+                {t.command.noMatch}
               </div>
             )}
           </div>

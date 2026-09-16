@@ -3,6 +3,7 @@
 import { Crosshair, Layers } from "lucide-react";
 import { IconButton, Segmented } from "../../components/controls";
 import { useAnalysisStore, usePlotStore } from "../../stores";
+import { t } from "../../i18n";
 
 export function PlotHeader() {
   const curve = useAnalysisStore((s) => s.curve);
@@ -11,23 +12,30 @@ export function PlotHeader() {
   return (
     <div className="flex h-9 shrink-0 items-center gap-2 px-3">
       <span className="truncate text-[13px] font-medium text-[var(--text-primary)]">
-        {curve ? "当前谱图" : "XRD Plot"}
+        {curve ? t.plot.current : t.plot.placeholder}
       </span>
       <span className="flex-1" />
       {curve && (
         <Segmented
           options={[
-            { value: "overlay", label: "Overlay" },
-            { value: "stacked", label: "Stacked" },
+            { value: "overlay", label: t.plot.overlay },
+            { value: "stacked", label: t.plot.stacked },
           ]}
           value={mode}
           onChange={setMode}
         />
       )}
-      <IconButton title="十字光标" active={crosshair} onClick={() => setCrosshair(!crosshair)}>
+      <IconButton
+        title={t.plot.crosshair}
+        active={crosshair}
+        onClick={() => setCrosshair(!crosshair)}
+      >
         <Crosshair size={15} />
       </IconButton>
-      <IconButton title="叠加模式切换" onClick={() => setMode(mode === "overlay" ? "stacked" : "overlay")}>
+      <IconButton
+        title={t.plot.toggleMode}
+        onClick={() => setMode(mode === "overlay" ? "stacked" : "overlay")}
+      >
         <Layers size={15} />
       </IconButton>
     </div>

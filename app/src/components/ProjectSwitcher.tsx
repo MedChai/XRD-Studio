@@ -8,6 +8,7 @@ import { Check, ChevronDown, FolderPlus } from "lucide-react";
 import { useProjectStore, useUiStore } from "../stores";
 import { Button } from "./controls";
 import { cn } from "./cn";
+import { t } from "../i18n";
 
 export function ProjectSwitcher() {
   const { projects, currentProjectId, setCurrentProject } = useProjectStore();
@@ -19,7 +20,7 @@ export function ProjectSwitcher() {
     <Popover.Root open={open} onOpenChange={setOpen}>
       <Popover.Trigger asChild>
         <button className="tr flex items-center gap-1 rounded-[var(--radius-control)] px-2 py-1 text-[13px] text-[var(--text-secondary)] hover:bg-[var(--hover)] hover:text-[var(--text-primary)]">
-          {current?.name ?? "No Project"}
+          {current?.name ?? t.project.none}
           <ChevronDown size={13} />
         </button>
       </Popover.Trigger>
@@ -51,7 +52,7 @@ export function ProjectSwitcher() {
             ))}
             {projects.length === 0 && (
               <div className="px-2.5 py-2 text-[12px] text-[var(--text-tertiary)]">
-                还没有项目
+                {t.project.empty}
               </div>
             )}
           </div>
@@ -64,7 +65,7 @@ export function ProjectSwitcher() {
             }}
           >
             <FolderPlus size={13} />
-            New Project…
+            {t.project.newProjectEllipsis}
           </button>
         </Popover.Content>
       </Popover.Portal>
@@ -98,7 +99,7 @@ export function NewProjectDialog() {
     setBusy(false);
     if (id != null) {
       setOpen(false);
-      showToast("success", `已创建项目 ${name.trim()}`);
+      showToast("success", t.project.created(name.trim()));
     }
   }
 
@@ -107,36 +108,36 @@ export function NewProjectDialog() {
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-40 bg-black/25 backdrop-blur-[2px]" />
         <Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-[380px] -translate-x-1/2 -translate-y-1/2 rounded-[var(--radius-dialog)] bg-[var(--bg-panel)] p-5 shadow-[var(--shadow-dialog)]">
-          <Dialog.Title className="text-[17px] font-semibold">New Project</Dialog.Title>
+          <Dialog.Title className="text-[17px] font-semibold">{t.project.dialogTitle}</Dialog.Title>
           <div className="mt-4 flex flex-col gap-3">
             <label className="flex flex-col gap-1 text-[13px] text-[var(--text-secondary)]">
-              Name
+              {t.project.nameLabel}
               <input
                 ref={inputRef}
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && void submit()}
-                placeholder="LFP Study"
+                placeholder={t.project.namePlaceholder}
                 className="rounded-[var(--radius-input)] border border-[var(--divider)] bg-[var(--bg-panel)] px-2.5 py-1.5 text-[13px] text-[var(--text-primary)] focus:border-[var(--accent)] focus:outline-none"
               />
             </label>
             <label className="flex flex-col gap-1 text-[13px] text-[var(--text-secondary)]">
-              Description
+              {t.project.descriptionLabel}
               <textarea
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
                 rows={2}
-                placeholder="可选"
+                placeholder={t.project.descriptionPlaceholder}
                 className="resize-none rounded-[var(--radius-input)] border border-[var(--divider)] bg-[var(--bg-panel)] px-2.5 py-1.5 text-[13px] text-[var(--text-primary)] focus:border-[var(--accent)] focus:outline-none"
               />
             </label>
           </div>
           <div className="mt-5 flex justify-end gap-2">
             <Button kind="ghost" onClick={() => setOpen(false)}>
-              Cancel
+              {t.project.cancel}
             </Button>
             <Button kind="primary" disabled={!name.trim() || busy} onClick={() => void submit()}>
-              {busy ? "创建中…" : "Create"}
+              {busy ? t.project.creating : t.project.create}
             </Button>
           </div>
         </Dialog.Content>
