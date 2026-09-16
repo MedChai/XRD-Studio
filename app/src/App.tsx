@@ -11,6 +11,8 @@ import { LibrarySidebar } from "./components/LibrarySidebar";
 import { StatusBar } from "./components/StatusBar";
 import { Toast } from "./components/Toast";
 import { NewProjectDialog } from "./components/ProjectSwitcher";
+import { RenameDialog } from "./features/library/RenameDialog";
+import { TrashDialog } from "./features/library/TrashDialog";
 import { PlotHeader } from "./features/plot/PlotHeader";
 import { XRDChart } from "./features/plot/XRDChart";
 import { PeakDrawer } from "./features/peaks/PeakDrawer";
@@ -59,6 +61,8 @@ export default function App() {
         void useAnalysisStore.getState().loadDataset(first.id);
       }
     });
+    // 回收站徽标要在启动时就有数
+    void useProjectStore.getState().loadTrash();
   }, [loadLibrary]);
 
   // 全局键盘(§44/§73)
@@ -77,6 +81,8 @@ export default function App() {
         useUiStore.getState().setImportOpen(true);
       } else if (e.key === "Escape") {
         useUiStore.getState().setPaletteOpen(false);
+        useUiStore.getState().setTrashOpen(false);
+        useUiStore.getState().setRenaming(null);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -132,6 +138,8 @@ export default function App() {
 
       <ImportSheet />
       <NewProjectDialog />
+      <RenameDialog />
+      <TrashDialog />
       <CommandPalette />
       <SettingsDialog />
       <Toast />

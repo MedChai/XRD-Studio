@@ -54,6 +54,38 @@ export const t = {
     empty: "还没有样品。点击「导入」开始。",
     newProject: "新建项目",
     importNewSample: "导入 / 新建样品",
+    /** 条目上的悬浮菜单 */
+    more: "更多操作",
+    rename: "重命名",
+    delete: "移到回收站",
+    trash: "回收站",
+  },
+
+  rename: {
+    title: "重命名",
+    label: "新名称",
+    cancel: "取消",
+    confirm: "确定",
+    saving: "保存中…",
+  },
+
+  trash: {
+    title: "回收站",
+    empty: "回收站是空的",
+    /** 每条的层级路径标签 */
+    kindProjects: "项目",
+    kindSamples: "样品",
+    kindDatasets: "数据集",
+    restore: "恢复",
+    purge: "彻底删除",
+    purging: "删除中…",
+    confirmPurge: "确认删除?",
+    purgeAll: "清空回收站",
+    confirmPurgeAll: "确认清空?",
+    close: "关闭",
+    /** 「彻底删除」是不可恢复的,文案必须说清后果 */
+    purgeWarning: "彻底删除后数据与文件都无法恢复。",
+    childHint: (n: number) => `含 ${n} 个子项`,
   },
 
   status: {
@@ -150,6 +182,9 @@ export const t = {
     exportPending: "导出功能在 Milestone 5 落地",
     switchToLight: "切换浅色模式",
     switchToDark: "切换深色模式",
+    renameDataset: "重命名当前数据集",
+    trashDataset: "将当前数据集移到回收站",
+    openTrash: "打开回收站",
     groupCommands: "命令",
     groupSamples: "样品",
     placeholder: "搜索命令或样品…",

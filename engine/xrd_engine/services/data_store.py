@@ -134,6 +134,43 @@ class DataStore:
             return np.load(xf), np.load(yf)
         return None
 
+    # --- 删除 ---
+
+    def remove_stored(self, stored_path: str) -> bool:
+        """永久删除一个 dataset 的存储目录 `data/<ULID>/`。
+
+        只在回收站的「彻底删除」时调用 —— 软删除不碰磁盘,所以磁盘占用
+        会一直累积到用户主动清理。
+
+        越界保护:除了 abs_path 的逃逸检查,这里还要求 ULID 目录的父目录
+        必须就叫 `data`。少了这一道,一个被构造成 `data/../database/x` 的
+        stored_path 就能删掉数据库目录。
+        """
+        if not stored_path:
+            return False
+        try:
+            file_path = self.abs_path(stored_path)
+        except ValueError:
+            return False
+
+        ulid_dir = file_path.parent
+        if ulid_dir.parent.name != "data":
+            return False
+        if not ulid_dir.is_dir():
+            return False
+
+        shutil.rmtree(ulid_dir, ignore_errors=True)
+        return not ulid_dir.exists()
+
+    def remove_curve_cache(self, dataset_id: int) -> None:
+        """清掉该 dataset 的处理结果缓存(可重建,删不掉也无害)。"""
+        cache_dir = self.root / "cache"
+        for kind in ("processed", "raw"):
+            for axis in ("x", "y"):
+                (cache_dir / f"ds{dataset_id}_{kind}_{axis}.npy").unlink(
+                    missing_ok=True
+                )
+
     # --- 导出 ---
 
     def export_path(self, filename: str) -> Path:

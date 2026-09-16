@@ -85,8 +85,37 @@ class TestCRUD:
         assert row["deleted_at"] is None
 
     def test_invalid_table_rejected(self, db):
-        with pytest.raises(AssertionError):
+        # 用 ValueError 而非 assert:python -O 会移除 assert,那时非法表名
+        # 会直接拼进 SQL,变成注入面
+        with pytest.raises(ValueError):
             db.soft_delete("peaks", 1)
+        with pytest.raises(ValueError):
+            db.restore("peaks", 1)
+
+    def test_soft_delete_returns_rowcount(self, populated_db):
+        db, _, sample_id, _ = populated_db
+        assert db.soft_delete("samples", sample_id) is True
+        # 重复删除不再改动行
+        assert db.soft_delete("samples", sample_id) is False
+        assert db.restore("samples", sample_id) is True
+        assert db.restore("samples", sample_id) is False
+
+    def test_soft_delete_updates_updated_at(self, populated_db):
+        db, _, sample_id, _ = populated_db
+        # 先把 updated_at 拨回一天前,再软删除 —— 否则同一秒内的两次
+        # datetime('now') 相等,断言会假通过
+        db.execute(
+            "UPDATE samples SET updated_at = datetime('now', '-1 day') WHERE id = ?",
+            (sample_id,),
+        )
+        before = db.query_one(
+            "SELECT updated_at FROM samples WHERE id = ?", (sample_id,)
+        )["updated_at"]
+        db.soft_delete("samples", sample_id)
+        after = db.query_one(
+            "SELECT updated_at FROM samples WHERE id = ?", (sample_id,)
+        )["updated_at"]
+        assert after != before
 
 
 class TestQueries:

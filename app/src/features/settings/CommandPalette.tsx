@@ -6,8 +6,10 @@ import {
   Download,
   FolderPlus,
   Moon,
+  Pencil,
   Search,
   Sun,
+  Trash2,
   Upload,
   Wand2,
 } from "lucide-react";
@@ -48,6 +50,40 @@ export function CommandPalette() {
       { id: "newProject", label: t.command.newProject, icon: <FolderPlus size={14} />, group: t.command.groupCommands, run: () => useUiStore.getState().setNewProjectOpen(true) },
       { id: "detect", label: t.command.detectPeaks, icon: <Wand2 size={14} />, group: t.command.groupCommands, run: () => useAnalysisStore.getState().patchPipeline({}) },
       { id: "export", label: t.command.exportPeaks, icon: <Download size={14} />, group: t.command.groupCommands, run: () => useUiStore.getState().showToast("success", t.command.exportPending) },
+      {
+        id: "renameDataset",
+        label: t.command.renameDataset,
+        icon: <Pencil size={14} />,
+        group: t.command.groupCommands,
+        run: () => {
+          const { datasetId, sampleId } = useSelectionStore.getState();
+          if (datasetId == null) return;
+          const name =
+            useProjectStore
+              .getState()
+              .samples.find((s) => s.id === sampleId)
+              ?.datasets.find((d) => d.id === datasetId)?.name ?? "";
+          useUiStore.getState().setRenaming({ table: "datasets", id: datasetId, name });
+        },
+      },
+      {
+        id: "trashDataset",
+        label: t.command.trashDataset,
+        icon: <Trash2 size={14} />,
+        group: t.command.groupCommands,
+        run: () => {
+          const { datasetId } = useSelectionStore.getState();
+          if (datasetId == null) return;
+          void useProjectStore.getState().deleteItem("datasets", datasetId);
+        },
+      },
+      {
+        id: "openTrash",
+        label: t.command.openTrash,
+        icon: <Trash2 size={14} />,
+        group: t.command.groupCommands,
+        run: () => useUiStore.getState().setTrashOpen(true),
+      },
       {
         id: "theme",
         label: theme === "dark" ? t.command.switchToLight : t.command.switchToDark,

@@ -112,6 +112,8 @@ export interface ImportResult {
   duplicates: {
     path: string;
     existing: {
+      /** 已存在的那条 dataset,供「打开已有」直接定位 */
+      datasetId: number;
       projectName: string;
       sampleName: string;
       datasetName: string;
@@ -127,6 +129,42 @@ export interface ImportResult {
   }[];
   failures: { path: string; reason: string }[];
   sampleId: number;
+}
+
+// ---------- 回收站 ----------
+
+/** 可删除/重命名的对象类型。用**表名**,与引擎命令参数一致,可直接透传。 */
+export type TrashKind = "projects" | "samples" | "datasets";
+
+export interface TrashItem {
+  kind: TrashKind;
+  id: number;
+  name: string;
+  deletedAt: string | null;
+  /** 层级路径,dataset 有全部两级,sample 只有 projectName */
+  projectName: string | null;
+  sampleName: string | null;
+  /** 隐式随之下线的子对象数,用于提示影响范围 */
+  childCount: number;
+}
+
+export interface TrashListResult {
+  items: TrashItem[];
+  total: number;
+}
+
+export interface RestoreResult {
+  id: number;
+  kind: TrashKind;
+  /** 一并向上恢复的祖先(父级此前也在回收站里时) */
+  restoredAncestors: { kind: TrashKind; name: string }[];
+}
+
+export interface SoftDeleteResult {
+  id: number;
+  kind: TrashKind;
+  /** 隐式随之下线的 dataset 数 */
+  cascadedDatasets: number;
 }
 
 // ---------- 响应封装 ----------

@@ -12,7 +12,11 @@ import type {
   PeakResult,
   PreviewResult,
   ProjectNode,
+  RestoreResult,
   SampleNode,
+  SoftDeleteResult,
+  TrashItem,
+  TrashListResult,
 } from "../types/engine";
 
 const isTauri = "__TAURI_INTERNALS__" in window;
@@ -107,6 +111,19 @@ const SAMPLES = ["LFP-500C", "LFP-450C", "LFP-400C", "NCM811-03"];
 
 let mockCurveCache: CurvePayload | null = null;
 
+/** 开发期 mock 的回收站。让「删除 → 出现在回收站 → 恢复 → 消失」这条链
+ * 在纯浏览器 `npm run dev` 下也能完整走通,否则回收站 UI 没法验证。 */
+const mockTrash: TrashItem[] = [];
+const mockRenamed = new Map<string, string>();
+
+function mockKey(table: string, id: number): string {
+  return `${table}:${id}`;
+}
+
+function isTrashed(table: string, id: number): boolean {
+  return mockTrash.some((x) => x.kind === table && x.id === id);
+}
+
 async function mockCommand(
   cmd: string,
   payload: Record<string, unknown>,
@@ -143,24 +160,43 @@ async function mockCommand(
     }
     case "analysis.commit":
       return ok({ analysisId: 1 });
-    case "projects.list":
+    case "projects.list": {
+      const projects: ProjectNode[] = [
+        { id: 1, name: mockRenamed.get("projects:1") ?? "LFP Study", description: "" },
+        { id: 2, name: mockRenamed.get("projects:2") ?? "NCM Study", description: "" },
+      ];
       return ok({
-        projects: [{ id: 1, name: "LFP Study", description: "" }],
-      } satisfies { projects: ProjectNode[] });
+        projects: projects.filter((p) => !isTrashed("projects", p.id)),
+      });
+    }
     case "projects.create":
       return ok({ projectId: 2 });
-    case "library.tree":
-      return ok({
-        samples: SAMPLES.map((name, i) => ({
-          id: i + 1,
-          project_id: 1,
-          name,
-          temperature: name.startsWith("LFP") ? name.slice(4, 7) : "",
-          duration: "2 h",
-          dataset_count: 1,
-          datasets: [{ id: i + 1, name: "scan-01.xy" }],
-        })),
-      } satisfies { samples: SampleNode[] });
+    case "library.tree": {
+      const samples: SampleNode[] = SAMPLES.map((name, i) => ({
+        id: i + 1,
+        project_id: 1,
+        name: mockRenamed.get(`samples:${i + 1}`) ?? name,
+        temperature: name.startsWith("LFP") ? name.slice(4, 7) : "",
+        duration: "2 h",
+        dataset_count: 1,
+        datasets: [
+          {
+            id: i + 1,
+            name: mockRenamed.get(`datasets:${i + 1}`) ?? "scan-01.xy",
+          },
+        ],
+      }));
+      // 删项目 → 里面样品一并不可见(隐式级联);删样品同理
+      const visible = isTrashed("projects", 1)
+        ? []
+        : samples
+            .filter((s) => !isTrashed("samples", s.id))
+            .map((s) => ({
+              ...s,
+              datasets: s.datasets.filter((d) => !isTrashed("datasets", d.id)),
+            }));
+      return ok({ samples: visible } satisfies { samples: SampleNode[] });
+    }
     case "datasets.import": {
       const first = Array.isArray(payload.paths) ? String(payload.paths[0]) : "file.xy";
       return ok({
@@ -177,9 +213,68 @@ async function mockCommand(
       return ok({ presets: [] });
     case "presets.apply":
       return ok({ applied: Number((payload.dataset_ids as unknown[])?.length ?? 0) });
-    case "meta.rename":
-    case "meta.soft_delete":
-      return ok({ id: payload.id });
+    case "meta.rename": {
+      const name = String(payload.name ?? "").trim();
+      if (!name) return fail("名称不能为空");
+      mockRenamed.set(mockKey(String(payload.table), Number(payload.id)), name);
+      return ok({ id: payload.id, name });
+    }
+    case "meta.soft_delete": {
+      const table = String(payload.table) as TrashItem["kind"];
+      const id = Number(payload.id);
+      if (!["projects", "samples", "datasets"].includes(table)) {
+        return fail("不支持删除的对象");
+      }
+      if (mockTrash.some((x) => x.kind === table && x.id === id)) {
+        return fail("该对象已在回收站中");
+      }
+      const projectName = mockRenamed.get("projects:1") ?? "LFP Study";
+      const sampleName =
+        mockRenamed.get(`samples:${id}`) ?? SAMPLES[id - 1] ?? "LFP-500C";
+      const name =
+        table === "projects"
+          ? (mockRenamed.get(`projects:${id}`) ?? projectName)
+          : table === "samples"
+            ? sampleName
+            : (mockRenamed.get(`datasets:${id}`) ?? "scan-01.xy");
+      mockTrash.unshift({
+        kind: table,
+        id,
+        name,
+        deletedAt: new Date().toISOString().slice(0, 19).replace("T", " "),
+        projectName: table === "projects" ? null : projectName,
+        sampleName: table === "datasets" ? sampleName : null,
+        childCount: table === "projects" ? SAMPLES.length : table === "samples" ? 1 : 0,
+      });
+      return ok({
+        id,
+        kind: table,
+        cascadedDatasets: table === "projects" ? SAMPLES.length : table === "samples" ? 1 : 0,
+      } satisfies SoftDeleteResult);
+    }
+    case "trash.list":
+      return ok({ items: [...mockTrash], total: mockTrash.length } satisfies TrashListResult);
+    case "meta.restore": {
+      const table = String(payload.table) as TrashItem["kind"];
+      const id = Number(payload.id);
+      const i = mockTrash.findIndex((x) => x.kind === table && x.id === id);
+      if (i < 0) return fail("该对象不在回收站中");
+      mockTrash.splice(i, 1);
+      return ok({ id, kind: table, restoredAncestors: [] } satisfies RestoreResult);
+    }
+    case "meta.purge": {
+      if (payload.all) {
+        const n = mockTrash.length;
+        mockTrash.length = 0;
+        return ok({ purged: n, removedFiles: n });
+      }
+      const table = String(payload.table) as TrashItem["kind"];
+      const id = Number(payload.id);
+      const i = mockTrash.findIndex((x) => x.kind === table && x.id === id);
+      if (i < 0) return fail("只能彻底删除回收站中的对象");
+      mockTrash.splice(i, 1);
+      return ok({ id, kind: table, removedFiles: 1 });
+    }
     default:
       return fail(`mock: 未实现命令 ${cmd}`);
   }

@@ -14,13 +14,14 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
-from ..database.db import Database
+from ..database.db import ALLOWED_TABLES, Database
 from ..importers.loader import (
     ColumnMappingRequired,
     LoadFailure,
@@ -187,6 +188,8 @@ class Engine:
                 duplicates.append({
                     "path": str(path),
                     "existing": {
+                        # datasetId 让前端能提供「打开已有」而不是只能放弃
+                        "datasetId": dup["id"],
                         "projectName": dup["project_name"],
                         "sampleName": dup["sample_name"],
                         "datasetName": dup["name"],
@@ -298,12 +301,24 @@ class Engine:
         return {"analysisId": analysis["id"]}
 
     def _cmd_peaks_detect(self, p: dict) -> dict:
-        """对已保存的 analysis 正式跑一遍寻峰并把结果写入 peaks 表。"""
-        analysis = self.db.query_one(
-            "SELECT * FROM analyses WHERE id = ?", (p["analysis_id"],)
-        )
-        if analysis is None:
-            raise EngineError("Analysis 不存在")
+        """对已保存的 analysis 正式跑一遍寻峰并把结果写入 peaks 表。
+
+        payload 接受 `analysis_id` **或** `dataset_id` 二选一:前端手里通常
+        只有 dataset_id(它不关心 analysis 的内部 id),支持 dataset_id 能
+        省掉一次多余往返。
+        """
+        analysis_id = p.get("analysis_id")
+        if analysis_id is None:
+            dataset_id = p.get("dataset_id")
+            if dataset_id is None:
+                raise EngineError("必须提供 analysis_id 或 dataset_id")
+            analysis = self._active_analysis(dataset_id)
+        else:
+            analysis = self.db.query_one(
+                "SELECT * FROM analyses WHERE id = ?", (analysis_id,)
+            )
+            if analysis is None:
+                raise EngineError("Analysis 不存在")
         curve = self._load_dataset_curve(analysis["dataset_id"])
         params = params_from_json(json.loads(analysis["pipeline_json"]))
         result = run_pipeline(curve, params)
@@ -437,9 +452,17 @@ class Engine:
 
     def _cmd_library_tree(self, p: dict) -> dict:
         rows = self.db.get_library_tree()
+        # 一并判父级删除状态:与 get_library_tree 的过滤条件保持一致。
+        # 只判 d.deleted_at 时,被删样品下的 dataset 仍会进 by_sample 字典
+        # (只是因为没有对应的 sample 行而不会被输出),功能上无害,但多读
+        # 了无用行,且两处条件不一致容易在后续改动中真的出错。
         datasets = self.db.query_all(
-            """SELECT id, sample_id, name FROM datasets
-               WHERE deleted_at IS NULL ORDER BY name"""
+            """SELECT d.id, d.sample_id, d.name FROM datasets d
+               JOIN samples s ON d.sample_id = s.id
+               JOIN projects p ON s.project_id = p.id
+               WHERE d.deleted_at IS NULL
+                 AND s.deleted_at IS NULL AND p.deleted_at IS NULL
+               ORDER BY d.name"""
         )
         by_sample: dict[int, list] = {}
         for d in datasets:
@@ -454,18 +477,188 @@ class Engine:
         return {"samples": out}
 
     def _cmd_meta_rename(self, p: dict) -> dict:
-        table = p["table"]
-        if table not in ("projects", "samples", "datasets"):
+        table = p.get("table")
+        if table not in ALLOWED_TABLES:
             raise EngineError("不支持重命名的对象")
+        name = (p.get("name") or "").strip()
+        if not name:
+            raise EngineError("名称不能为空")
+        if len(name) > 200:
+            raise EngineError("名称过长(最多 200 字)")
+        row_id = p.get("id")
+        # 校验存在性与软删状态:否则空名/已删对象会静默"重命名成功"
+        if self.db.query_one(
+            f"SELECT id FROM {table} WHERE id = ? AND deleted_at IS NULL",
+            (row_id,),
+        ) is None:
+            raise EngineError("对象不存在或已在回收站中")
         self.db.execute(
             f"UPDATE {table} SET name = ?, updated_at = datetime('now') WHERE id = ?",
-            ((p.get("name") or "").strip(), p["id"]),
+            (name, row_id),
         )
-        return {"id": p["id"]}
+        return {"id": row_id, "name": name}
 
     def _cmd_meta_soft_delete(self, p: dict) -> dict:
-        self.db.soft_delete(p["table"], p["id"])
-        return {"id": p["id"]}
+        """把对象移入回收站(Trash 语义,§10.5)。
+
+        软删除是**隐式级联**的:只标记被直接删除的这一行,子对象因为父级
+        不可见而一并从 Library 消失;恢复时子对象自动回来,正是因为它们
+        从未被写过 deleted_at。详见 Database.soft_delete 的注释。
+        """
+        table = p.get("table")
+        # 白名单在命令层显式校验,不依赖 db 层的断言 —— 否则非法表名会被
+        # 兜底分支伪装成"引擎内部错误",用户看不到人话
+        if table not in ALLOWED_TABLES:
+            raise EngineError("不支持删除的对象")
+        row_id = p.get("id")
+        if self.db.query_one(
+            f"SELECT id FROM {table} WHERE id = ?", (row_id,)
+        ) is None:
+            raise EngineError("对象不存在")
+        # 必须在删除**之前**统计:删完父级就不可见了,计数会恒为 0
+        cascaded = self.db.descendant_dataset_count(table, row_id)
+        if not self.db.soft_delete(table, row_id):
+            raise EngineError("该对象已在回收站中")
+        return {
+            "id": row_id,
+            "kind": table,
+            # 隐式随之下线的 dataset 数,供前端提示"已移入回收站(含 N 个数据集)"
+            "cascadedDatasets": cascaded,
+        }
+
+    # ---------- trash(回收站)----------
+
+    def _cmd_trash_list(self, p: dict) -> dict:
+        rows = self.db.trash_rows(limit=int(p.get("limit", 500)))
+        return {
+            "items": [
+                {
+                    "kind": r["kind"],
+                    "id": r["id"],
+                    "name": r["name"],
+                    "deletedAt": r["deleted_at"],
+                    "projectName": r["project_name"],
+                    "sampleName": r["sample_name"],
+                    "childCount": r["child_count"],
+                }
+                for r in rows
+            ],
+            "total": len(rows),
+        }
+
+    def _cmd_meta_restore(self, p: dict) -> dict:
+        """从回收站恢复。父级仍被删除时**一并向上恢复父级**。
+
+        级联只向上、不向下:
+          - 向上:恢复一个 dataset 而其 sample/project 还在回收站里时,
+            单恢复 dataset 它依然不可见,用户会觉得"恢复没生效"。
+          - 向下:恢复一个 project 时不主动恢复其 sample/dataset —— 它们
+            从未被写过 deleted_at(隐式级联),恢复 project 后自然全部可见。
+            这个不对称是隐式级联带来的直接好处,不是遗漏。
+        """
+        table = p.get("table")
+        if table not in ALLOWED_TABLES:
+            raise EngineError("不支持恢复的对象")
+        row_id = p.get("id")
+        row = self.db.query_one(f"SELECT * FROM {table} WHERE id = ?", (row_id,))
+        if row is None:
+            raise EngineError("对象不存在")
+        if row["deleted_at"] is None:
+            raise EngineError("该对象不在回收站中")
+
+        ancestors: list[dict] = []
+        cascade = p.get("cascade_parent", True)
+
+        if cascade and table == "datasets":
+            sample = self.db.query_one(
+                "SELECT * FROM samples WHERE id = ?", (row["sample_id"],)
+            )
+            if sample is not None and sample["deleted_at"] is not None:
+                self.db.restore("samples", sample["id"])
+                ancestors.append({"kind": "samples", "name": sample["name"]})
+                project = self.db.query_one(
+                    "SELECT * FROM projects WHERE id = ?", (sample["project_id"],)
+                )
+                if project is not None and project["deleted_at"] is not None:
+                    self.db.restore("projects", project["id"])
+                    ancestors.append({"kind": "projects", "name": project["name"]})
+        elif cascade and table == "samples":
+            project = self.db.query_one(
+                "SELECT * FROM projects WHERE id = ?", (row["project_id"],)
+            )
+            if project is not None and project["deleted_at"] is not None:
+                self.db.restore("projects", project["id"])
+                ancestors.append({"kind": "projects", "name": project["name"]})
+
+        self.db.restore(table, row_id)
+        return {"id": row_id, "kind": table, "restoredAncestors": ancestors}
+
+    def _cmd_meta_purge(self, p: dict) -> dict:
+        """**永久删除**(不可恢复),并清理磁盘副本。
+
+        这是唯一真正删文件的入口 —— 软删除刻意不碰磁盘,以便恢复时数据
+        仍然完整。所以 purge 必须在 UI 上做二次确认。
+        """
+        if p.get("all"):
+            return self._purge_all()
+
+        table = p.get("table")
+        if table not in ALLOWED_TABLES:
+            raise EngineError("不支持删除的对象")
+        row_id = p.get("id")
+        row = self.db.query_one(
+            f"SELECT id, deleted_at FROM {table} WHERE id = ?", (row_id,)
+        )
+        if row is None:
+            raise EngineError("对象不存在")
+        if row["deleted_at"] is None:
+            raise EngineError("只能彻底删除回收站中的对象")
+
+        # 先取 stored_path,再删 DB 行(行删了就查不到了)
+        stored = [r["stored_path"] for r in self.db.dataset_ids_of(table, row_id)]
+        ds_ids = [r["id"] for r in self.db.dataset_ids_of(table, row_id)]
+        if table == "datasets":
+            self.db.purge_dataset(row_id)
+        elif table == "samples":
+            self.db.purge_sample(row_id)
+        else:
+            self.db.purge_project(row_id)
+        self._remove_files(stored, ds_ids)
+        return {"id": row_id, "kind": table, "removedFiles": len(stored)}
+
+    def _purge_all(self) -> dict:
+        """清空回收站。必须由深到浅处理,否则删了父级就找不到子级了。"""
+        rows = self.db.trash_rows(limit=100000)
+        order = {"datasets": 0, "samples": 1, "projects": 2}
+        ordered = sorted(rows, key=lambda r: order[r["kind"]])
+        removed, count = 0, 0
+        for r in ordered:
+            table, row_id = r["kind"], r["id"]
+            stored = [x["stored_path"] for x in self.db.dataset_ids_of(table, row_id)]
+            ds_ids = [x["id"] for x in self.db.dataset_ids_of(table, row_id)]
+            if table == "datasets":
+                self.db.purge_dataset(row_id)
+            elif table == "samples":
+                self.db.purge_sample(row_id)
+            else:
+                self.db.purge_project(row_id)
+            removed += self._remove_files(stored, ds_ids)
+            count += 1
+        return {"purged": count, "removedFiles": removed}
+
+    def _remove_files(self, stored: list[str], ds_ids: list[int]) -> int:
+        """删磁盘副本。**失败只忽略,不抛异常** —— 此时 DB 行已经删了,
+        抛异常只会让用户以为整件事失败了,而实际状态是"行没了、文件残留",
+        这是可以接受的(留点垃圾,不是数据丢失)。"""
+        removed = 0
+        for path in stored:
+            with contextlib.suppress(Exception):
+                if self.store.remove_stored(path):
+                    removed += 1
+        for ds_id in ds_ids:
+            with contextlib.suppress(Exception):
+                self.store.remove_curve_cache(ds_id)
+        return removed
 
     def close(self) -> None:
         self.db.close()
