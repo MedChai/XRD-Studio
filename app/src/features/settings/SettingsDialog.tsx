@@ -2,9 +2,10 @@
  * Milestone 1 先做 Appearance 与 About 骨架。 */
 
 import * as Dialog from "@radix-ui/react-dialog";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Segmented } from "../../components/controls";
 import { useAppStore, useUiStore } from "../../stores";
+import { engineCommand, revealPath } from "../../services/engine";
 import type { ThemeMode } from "../../types/engine";
 import { cn } from "../../components/cn";
 import { t } from "../../i18n";
@@ -26,6 +27,27 @@ export function SettingsDialog() {
   const setOpen = useUiStore((s) => s.setSettingsOpen);
   const { theme, setTheme } = useAppStore();
   const [tab, setTab] = useState<TabId>("Appearance");
+  const showToast = useUiStore((s) => s.showToast);
+  const [dataPaths, setDataPaths] = useState<{
+    dataRoot: string;
+    logFile: string;
+    logExists: boolean;
+  } | null>(null);
+
+  // 打开 Data 页时取一次路径(装完软件第一个问题:"数据存在哪了")
+  useEffect(() => {
+    if (!open || tab !== "Data" || dataPaths != null) return;
+    void engineCommand<{ dataRoot: string; logFile: string; logExists: boolean }>(
+      "meta.paths",
+    ).then((r) => {
+      if (r.ok) setDataPaths(r.data);
+    });
+  }, [open, tab, dataPaths]);
+
+  async function reveal(path: string) {
+    const r = await revealPath(path);
+    if (!r.ok) showToast("error", t.settings.revealFailed(r.error));
+  }
 
   return (
     <Dialog.Root open={open} onOpenChange={setOpen}>
@@ -83,7 +105,41 @@ export function SettingsDialog() {
                 </div>
               </div>
             )}
-            {tab !== "Appearance" && tab !== "About" && (
+            {tab === "Data" && (
+              <div className="flex flex-col gap-3">
+                <h3 className="text-[17px] font-semibold">{t.settings.dataTitle}</h3>
+                <div className="text-[12px] text-[var(--text-secondary)]">
+                  {t.settings.dataRootHint}
+                </div>
+                {dataPaths && (
+                  <div className="rounded-[var(--radius-control)] bg-[var(--bg-elevated)] px-3 py-2">
+                    <div className="mb-1 text-[11px] text-[var(--text-tertiary)]">
+                      {t.settings.dataRootLabel}
+                    </div>
+                    <div className="font-mono text-[11px] break-all text-[var(--text-primary)]">
+                      {dataPaths.dataRoot}
+                    </div>
+                  </div>
+                )}
+                <div className="flex gap-2">
+                  <button
+                    className="tr rounded-[var(--radius-control)] border border-[var(--divider)] px-3 py-1.5 text-[12px] hover:bg-[var(--hover)]"
+                    onClick={() => dataPaths && void reveal(dataPaths.dataRoot)}
+                  >
+                    {t.settings.openDataDir}
+                  </button>
+                  <button
+                    className="tr rounded-[var(--radius-control)] border border-[var(--divider)] px-3 py-1.5 text-[12px] hover:bg-[var(--hover)] disabled:opacity-50"
+                    disabled={!dataPaths?.logExists}
+                    title={dataPaths && !dataPaths.logExists ? t.settings.openLogMissing : undefined}
+                    onClick={() => dataPaths?.logExists && void reveal(dataPaths.logFile)}
+                  >
+                    {t.settings.openLog}
+                  </button>
+                </div>
+              </div>
+            )}
+            {tab !== "Appearance" && tab !== "About" && tab !== "Data" && (
               <div className="flex h-full items-center justify-center text-[12px] text-[var(--text-tertiary)]">
                 {t.settings.pending(
                   TABS.find((x) => x.id === tab)?.label ?? tab,

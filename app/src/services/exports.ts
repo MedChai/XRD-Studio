@@ -127,6 +127,77 @@ export async function exportFigure(
   return { ok: true };
 }
 
+/** 批量导出(S5 场景收尾:4 个温度点交差要的是整项目全套表,不该点 N 次)。
+ *
+ * Tauri:只选一次目录,逐条落盘 <名字>_peaks.csv / <名字>_processed.csv;
+ * 浏览器 dev:退化为逐条下载。图(PNG)不进批量 —— 图是前端 ECharts 渲的,
+ * 批量渲图需要逐个切数据集,会打断用户操作,按需单条导出。 */
+export async function exportBatch(
+  datasets: { id: number; name: string }[],
+  opts: { peaks: boolean; data: boolean },
+): Promise<{
+  ok: boolean;
+  cancelled?: boolean;
+  exported?: number;
+  dir?: string;
+  error?: string;
+}> {
+  if (datasets.length === 0) return { ok: false, error: "没有可导出的数据集" };
+  if (isTauri) {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const dir = await open({ directory: true, multiple: false, title: "选择导出目录" });
+    if (dir == null || Array.isArray(dir)) return { ok: false, cancelled: true };
+    let exported = 0;
+    let lastError: string | undefined;
+    for (const ds of datasets) {
+      const stem = ds.name.replace(/\.[^.]+$/, "");
+      if (opts.peaks) {
+        const r = await engineCommand("export.peaks", {
+          dataset_id: ds.id,
+          path: `${dir}\\${stem}_peaks.csv`,
+          overwrite: true,
+        });
+        if (r.ok) exported += 1;
+        else lastError = r.error;
+      }
+      if (opts.data) {
+        const r = await engineCommand("export.data", {
+          dataset_id: ds.id,
+          path: `${dir}\\${stem}_processed.csv`,
+          overwrite: true,
+        });
+        if (r.ok) exported += 1;
+        else lastError = r.error;
+      }
+    }
+    if (exported === 0 && lastError) return { ok: false, error: lastError };
+    return { ok: true, exported, dir: String(dir) };
+  }
+  // 浏览器:逐条下载(每个数据集一次保存弹窗/一次下载,比没有强)
+  let exported = 0;
+  for (const ds of datasets) {
+    if (opts.peaks) {
+      const peaks = await engineCommand<{ peaks: PeakResult[] }>("peaks.list", {
+        dataset_id: ds.id,
+      });
+      const list = peaks.ok ? peaks.data.peaks : [];
+      const r = await exportPeaks(ds.id, ds.name, list);
+      if (r.ok) exported += 1;
+    }
+    if (opts.data) {
+      const cur = await engineCommand<CurvePayload>("datasets.curve", {
+        dataset_id: ds.id,
+        max_points: 20000,
+      });
+      if (cur.ok) {
+        const r = await exportData(ds.id, ds.name, cur.data);
+        if (r.ok) exported += 1;
+      }
+    }
+  }
+  return { ok: true, exported };
+}
+
 /** 电化学图 PNG 导出:与 exportFigure 同链路,但不带 dataset_id ——
  *  引擎 export.figure 的旁车溯源是可选的(commands.py `_cmd_export_figure`,
  *  p.get("dataset_id") 为 None 时跳过),电化学 cell 没有谱图 dataset。 */

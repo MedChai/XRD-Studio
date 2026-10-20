@@ -1686,6 +1686,20 @@ class Engine:
                 return {"path": str(stored), "kind": "stored"}
         raise EngineError("文件已找不到(原文件与库内副本都不在)")
 
+    def _cmd_meta_paths(self, p: dict) -> dict:
+        """数据目录/日志文件路径(Settings 的 Data 页,README §8.3)。
+
+        用户装完软件第一个问题就是"数据存在哪了/崩溃了看什么",
+        不能让人自己去翻 %LOCALAPPDATA%。
+        """
+        data_root = Path(self.store.root)
+        log = data_root / "logs" / "engine.log"
+        return {
+            "dataRoot": str(data_root),
+            "logFile": str(log),
+            "logExists": log.exists(),
+        }
+
     def _cmd_meta_soft_delete(self, p: dict) -> dict:
         """把对象移入回收站(Trash 语义,§10.5)。
 

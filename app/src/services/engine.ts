@@ -892,6 +892,13 @@ async function mockCommand(
         kind: "source",
       } satisfies MetaFilePathResult);
     }
+    case "meta.paths":
+      // 浏览器 dev 没有真实数据目录,给演示路径走通 UI 流程
+      return ok({
+        dataRoot: "C:\\Users\\demo\\AppData\\Local\\XRDStudio",
+        logFile: "C:\\Users\\demo\\AppData\\Local\\XRDStudio\\logs\\engine.log",
+        logExists: true,
+      });
     case "meta.soft_delete": {
       const table = String(payload.table) as TrashItem["kind"];
       const id = Number(payload.id);
@@ -1348,6 +1355,31 @@ export function ecExport(
  *
  *  路径取不到(原文件与库内副本都不在)时返回 ok:false + 引擎的人话错误。
  */
+/** 把任意磁盘路径在资源管理器中显示(Settings 数据页/文件定位共用)。 */
+export async function revealPath(
+  path: string,
+): Promise<
+  | { ok: true; path: string; mode: "reveal" | "degraded" }
+  | { ok: false; error: string }
+> {
+  if (!isTauri) {
+    // 尽力复制;失败也把路径 toast 出来,信息本身才是关键
+    try {
+      await navigator.clipboard.writeText(path);
+    } catch {
+      /* 剪贴板不可用(权限/非安全上下文)→ 只展示路径 */
+    }
+    return { ok: true, path, mode: "degraded" };
+  }
+  try {
+    const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
+    await revealItemInDir(path);
+    return { ok: true, path, mode: "reveal" };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
 export async function revealInExplorer(
   table: TrashKind,
   id: number,
@@ -1360,20 +1392,5 @@ export async function revealInExplorer(
     id,
   });
   if (!r.ok) return { ok: false, error: r.error };
-  if (!isTauri) {
-    // 尽力复制;失败也把路径 toast 出来,信息本身才是关键
-    try {
-      await navigator.clipboard.writeText(r.data.path);
-    } catch {
-      /* 剪贴板不可用(权限/非安全上下文)→ 只展示路径 */
-    }
-    return { ok: true, path: r.data.path, mode: "degraded" };
-  }
-  try {
-    const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
-    await revealItemInDir(r.data.path);
-    return { ok: true, path: r.data.path, mode: "reveal" };
-  } catch (e) {
-    return { ok: false, error: e instanceof Error ? e.message : String(e) };
-  }
+  return revealPath(r.data.path);
 }

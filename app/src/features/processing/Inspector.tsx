@@ -1,6 +1,6 @@
 /** 右侧 Inspector(§27):PROCESSING / PEAKS / DISPLAY / SAMPLE 四段。 */
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ChevronDown } from "lucide-react";
 import {
   Button,
@@ -42,6 +42,14 @@ export function Inspector() {
   const recomputeAnnotation = useAnalysisStore((s) => s.recomputeAnnotation);
   const detecting = useAnalysisStore((s) => s.detecting);
   const detectPeaks = useAnalysisStore((s) => s.detectPeaks);
+  const peaks = useAnalysisStore((s) => s.peaks);
+  // 未归属峰提示:杂相峰引擎刻意报 none(CLAUDE.md 高镍单物相假设)。
+  // 不提示的话用户会把"没标"读成"没有杂相" —— 那是一个错误的科学结论。
+  const unassignedCount = useMemo(
+    () => peaks.filter((p) => !p.hkl && p.hkl_confidence !== "ambiguous").length,
+    [peaks],
+  );
+  const annotatedCount = useMemo(() => peaks.filter((p) => p.hkl).length, [peaks]);
   // 逐字段选择器(§15):plotStore 全量解构会让 crosshair/cursor 的
   // mousemove 更新重渲染整个 Inspector。
   const offset = usePlotStore((s) => s.offset);
@@ -68,6 +76,25 @@ export function Inspector() {
   const [presets, setPresets] = useState<AnalysisPreset[]>([]);
   const [presetName, setPresetName] = useState("");
   const [presetId, setPresetId] = useState<number | null>(null);
+  // S5 套用范围:只对所选几条谱套参数是真实需求(如"400/450 °C 两条"),
+  // 默认整项目会误改全部
+  const [presetScope, setPresetScope] = useState<"current" | "selected" | "project">(
+    "project",
+  );
+  const [presetDsSel, setPresetDsSel] = useState<Set<number>>(new Set());
+  const projectDatasets = useMemo(() => {
+    const out: { id: number; label: string }[] = [];
+    for (const s of samples) {
+      if (s.project_id !== profileProjectId) continue;
+      for (const d of s.datasets) out.push({ id: d.id, label: `${s.name} / ${d.name}` });
+      for (const b of s.batches) {
+        for (const d of b.datasets) {
+          out.push({ id: d.id, label: `${s.name} / ${b.name} / ${d.name}` });
+        }
+      }
+    }
+    return out;
+  }, [samples, profileProjectId]);
   const [highNiResult, setHighNiResult] = useState<HighNiResult | null>(null);
   const [highNiBusy, setHighNiBusy] = useState(false);
   /** 库里存的结果是对上一版文件算的(source_hash 不匹配)。仍显示,但提示重算。 */
@@ -198,14 +225,20 @@ export function Inspector() {
 
   async function applyPreset() {
     if (profileProjectId == null || presetId == null) return;
-    // S5:把预设批量写到项目下所有数据集的 analyses.pipeline_json。
+    // S5:把预设批量写到所选范围数据集的 analyses.pipeline_json。
     // 当前打开的那条再 loadDataset 读回 —— 不旁路 preview/commit 状态机。
-    const ids = samples
-      .filter((s) => s.project_id === profileProjectId)
-      .flatMap((s) => [
-        ...s.datasets.map((d) => d.id),
-        ...s.batches.flatMap((b) => b.datasets.map((d) => d.id)),
-      ]);
+    const ids =
+      presetScope === "current"
+        ? loadedDatasetId != null
+          ? [loadedDatasetId]
+          : []
+        : presetScope === "selected"
+          ? [...presetDsSel]
+          : projectDatasets.map((d) => d.id);
+    if (ids.length === 0) {
+      showToast("error", t.inspector.presetNoTarget);
+      return;
+    }
     const r = await engineCommand<{ applied: number }>("presets.apply", {
       preset_id: presetId,
       dataset_ids: ids,
@@ -510,6 +543,47 @@ export function Inspector() {
               {t.inspector.presetApply}
             </Button>
           </div>
+          <div className="px-3 pb-1">
+            <div className="mb-1 text-[11px] text-[var(--text-tertiary)]">
+              {t.inspector.presetScopeLabel}
+            </div>
+            <Segmented
+              options={[
+                { value: "current", label: t.inspector.presetScopeCurrent },
+                { value: "selected", label: t.inspector.presetScopeSelected },
+                { value: "project", label: t.inspector.presetScopeProject },
+              ]}
+              value={presetScope}
+              onChange={setPresetScope}
+            />
+            {presetScope === "selected" && (
+              <div className="mt-1 max-h-28 overflow-auto rounded-[var(--radius-control)] border border-[var(--divider)] p-1">
+                {projectDatasets.length === 0 && (
+                  <div className="px-1 py-1 text-[11px] text-[var(--text-tertiary)]">
+                    {t.inspector.presetNoTarget}
+                  </div>
+                )}
+                {projectDatasets.map((d) => (
+                  <label
+                    key={d.id}
+                    className="flex cursor-pointer items-center gap-1.5 rounded px-1 py-0.5 text-[11px] hover:bg-[var(--hover)]"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={presetDsSel.has(d.id)}
+                      onChange={(e) => {
+                        const next = new Set(presetDsSel);
+                        if (e.target.checked) next.add(d.id);
+                        else next.delete(d.id);
+                        setPresetDsSel(next);
+                      }}
+                    />
+                    <span className="truncate">{d.label}</span>
+                  </label>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       </section>
 
@@ -702,6 +776,11 @@ export function Inspector() {
 
         {/* 标注依据:晶胞是每张谱精修出来的,把它摊开给用户核对。
             归属不是"软件说是就是" —— 用户要能自己验证 a/c 是否合理。 */}
+        {annotatedCount > 0 && unassignedCount > 0 && (
+          <div className="mt-2 rounded-[var(--radius-control)] bg-[color-mix(in_srgb,var(--warning)_16%,transparent)] px-2 py-1 text-[10px] leading-relaxed text-[var(--text-secondary)]">
+            {t.inspector.unassignedHint(unassignedCount)}
+          </div>
+        )}
         {annotation && (
           <div className="mt-2 rounded-[var(--radius-control)] bg-[var(--bg-elevated)] px-3 py-2 text-[11px] leading-relaxed text-[var(--text-secondary)]">
             <div className="mb-1 font-medium text-[var(--text-primary)]">

@@ -192,6 +192,9 @@ export const t = {
     createProfile: "新建档案",
     profileCreated: "材料档案已创建",
     defaultProfileName: "高镍无钴层状默认档案",
+    /** 杂相保守报 none 后必须提示 —— "没标"不等于"没有杂相" */
+    unassignedHint: (n: number) =>
+      `存在 ${n} 个未归属峰 —— “没标”不代表“没有杂相”:样品含残碱(Li₂CO₃/LiOH)、尖晶石等未建模物相时峰会如实报未归属。`,
     runHighNi: "运行高镍分析",
     highNiRunning: "分析中…",
     highNiDone: "高镍分析完成",
@@ -249,6 +252,12 @@ export const t = {
     presetNamePlaceholder: "预设名称",
     presetSave: "存为预设",
     presetApply: "应用",
+    /** 套用范围(此前固定整项目,会误改全部数据集) */
+    presetScopeLabel: "套用范围",
+    presetScopeCurrent: "当前数据集",
+    presetScopeSelected: "所选数据集",
+    presetScopeProject: "整项目",
+    presetNoTarget: "没有可套用的数据集",
     presetSaved: (name: string) => `已保存预设「${name}」`,
     presetApplied: (n: number) => `已把预设应用到 ${n} 个数据集`,
     presetNone: "暂无预设",
@@ -332,6 +341,13 @@ export const t = {
     batchLabel: "批次(可选)",
     batchPlaceholder: "留空则不分组",
     batchHint: "同一次制样的可归一批",
+    /** 采集坐标与波长:导入时问清,避免非 Cu 靶静默错位 */
+    axisLabel: "采集坐标",
+    axisHint: "与波长",
+    axisTwoTheta: "2θ (°)",
+    axisD: "d (Å)",
+    axisQ: "Q (Å⁻¹)",
+    wavelengthHint: "波长 λ(Å)。Cu Kα=1.5418,Co Kα=1.7903 —— 填错会让 d 值与晶面标注整体错位",
     scanFolder: "导入整个文件夹",
     folderNeedsDesktop: "文件夹导入需要桌面版;浏览器开发模式请手动选择文件",
     scanTitle: "确认实验分组",
@@ -368,6 +384,8 @@ export const t = {
     fitAll: "适应全部(回到全局视图)",
     exportPeaks: "导出峰表 (CSV)",
     exportData: "导出处理后数据 (CSV)",
+    exportBatch: "批量导出(当前项目全部峰表+数据)",
+    exportBatchDone: (n: number) => `批量导出完成:${n} 个文件`,
     exportFigure: "导出当前图表 (PNG)",
     exportFigureSvg: "导出当前图表 (SVG)",
     exportPending: "当前没有可导出的数据集",
@@ -401,6 +419,14 @@ export const t = {
     techStack: "Tauri 2 · React · ECharts · Python Engine",
     nonDestructive: "数据非破坏性管理,原始谱永不被修改。",
     pending: (tab: string) => `${tab}设置将在 Milestone 5–6 落地`,
+    /** Data 页:数据存哪了/崩溃看什么(README §8.3) */
+    dataTitle: "数据与存储",
+    dataRootLabel: "数据存储位置",
+    dataRootHint: "数据库、原始文件副本、导出与日志都在这个目录下",
+    openDataDir: "打开数据目录",
+    openLog: "打开日志",
+    openLogMissing: "日志文件还不存在(引擎尚未写过日志)",
+    revealFailed: (err: string) => `无法打开:${err}`,
   },
 
   empty: {

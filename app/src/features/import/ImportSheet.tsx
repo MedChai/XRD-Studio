@@ -32,6 +32,10 @@ export function ImportSheet() {
   const [destMode, setDestMode] = useState<"new" | "existing">("new");
   const [destSampleId, setDestSampleId] = useState<number | null>(null);
   const [batchName, setBatchName] = useState("");
+  // 采集坐标轴与波长:导入时就要问 —— Co/Fe 靶数据按默认 Cu 1.5418 入库后,
+  // d/Q 换算与晶面标注会静默错位,事后才发现全错(§7.2 宁问不猜错)。
+  const [axisType, setAxisType] = useState<"two_theta" | "d" | "q">("two_theta");
+  const [wavelength, setWavelength] = useState("1.5418");
   /** 文件夹扫描的建议分组(确认前不落库) */
   const [scan, setScan] = useState<ScanResult | null>(null);
   const [busy, setBusy] = useState(false);
@@ -141,8 +145,10 @@ export function ImportSheet() {
       const r = await engineCommand<ImportResult>("datasets.import", {
         paths: group.paths,
         project_id: project,
-        new_sample: { name: group.name },
+        new_sample: { name: group.name, wavelength: Number(wavelength) || 1.5418 },
         batch_source_path: scan.folder,
+        x_axis_type: axisType,
+        wavelength: Number(wavelength) || 1.5418,
       });
       if (!r.ok) {
         failed += group.paths.length;
@@ -231,7 +237,12 @@ export function ImportSheet() {
       ? { sample_id: mappingSampleId ?? useUiStore.getState().lastSampleId }
       : destMode === "existing" && destSampleId != null
         ? { sample_id: destSampleId }
-        : { new_sample: { name: newSampleName || t.import.defaultSampleName } };
+        : {
+            new_sample: {
+              name: newSampleName || t.import.defaultSampleName,
+              wavelength: Number(wavelength) || 1.5418,
+            },
+          };
     const batch = batchName.trim() ? { batch_name: batchName.trim() } : {};
 
     const r = await engineCommand<ImportResult>("datasets.import", {
@@ -239,6 +250,8 @@ export function ImportSheet() {
       project_id: project,
       ...destination,
       ...batch,
+      x_axis_type: axisType,
+      wavelength: Number(wavelength) || 1.5418,
       ...(mapping ? { x_column: (xColumn ?? mapX) - 1, y_column: (yColumn ?? mapY) - 1 } : {}),
       ...(importAnyway ? { import_anyway: true } : {}),
     });
@@ -496,6 +509,35 @@ export function ImportSheet() {
                   />
                 </label>
               )}
+
+              {/* 采集轴与波长:非 Cu 靶必须在导入时说清,否则标注/d 值静默错位 */}
+              <div className="flex items-start justify-between gap-2 text-[13px] text-[var(--text-secondary)]">
+                <span className="pt-1">
+                  {t.import.axisLabel}
+                  <span className="ml-1 text-[11px] text-[var(--text-tertiary)]">
+                    {t.import.axisHint}
+                  </span>
+                </span>
+                <div className="flex w-56 items-center gap-1.5">
+                  <select
+                    value={axisType}
+                    onChange={(e) => setAxisType(e.target.value as typeof axisType)}
+                    className="flex-1 rounded-[var(--radius-input)] border border-[var(--divider)] bg-[var(--bg-panel)] px-2 py-1 text-[12px]"
+                  >
+                    <option value="two_theta">{t.import.axisTwoTheta}</option>
+                    <option value="d">{t.import.axisD}</option>
+                    <option value="q">{t.import.axisQ}</option>
+                  </select>
+                  <input
+                    value={wavelength}
+                    onChange={(e) => setWavelength(e.target.value)}
+                    placeholder="1.5418"
+                    title={t.import.wavelengthHint}
+                    className="w-20 rounded-[var(--radius-input)] border border-[var(--divider)] bg-[var(--bg-panel)] px-2 py-1 text-right text-[12px] tabular focus:border-[var(--accent)] focus:outline-none"
+                  />
+                  <span className="text-[11px] text-[var(--text-tertiary)]">Å</span>
+                </div>
+              </div>
             </div>
           ) : (
             <div className="mt-4">

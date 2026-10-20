@@ -29,6 +29,7 @@ import {
   exportFigure,
   exportFigureSvg,
   exportPeaks,
+  exportBatch,
 } from "../../services/exports";
 
 interface Entry {
@@ -112,6 +113,37 @@ export function CommandPalette() {
         },
       },
       {
+        // S5 收尾:4 个温度点交差要整项目全套表,不该逐条点导出
+        id: "exportBatch",
+        label: t.command.exportBatch,
+        icon: <Download size={14} />,
+        group: t.command.groupCommands,
+        run: () => {
+          const projectId = useProjectStore.getState().currentProjectId;
+          const list = samples
+            .filter((s) => s.project_id === projectId)
+            .flatMap((s) => [
+              ...s.datasets.map((d) => ({ id: d.id, name: d.name })),
+              ...s.batches.flatMap((b) =>
+                b.datasets.map((d) => ({ id: d.id, name: `${b.name}_${d.name}` })),
+              ),
+            ]);
+          if (list.length === 0) {
+            useUiStore.getState().showToast("error", t.command.exportPending);
+            return;
+          }
+          void exportBatch(list, { peaks: true, data: true }).then((r) => {
+            if (r.cancelled) return;
+            useUiStore.getState().showToast(
+              r.ok ? "success" : "error",
+              r.ok
+                ? t.command.exportBatchDone(r.exported ?? 0)
+                : (r.error ?? t.command.exportPending),
+            );
+          });
+        },
+      },
+      {
         id: "exportFigure",
         label: t.command.exportFigure,
         icon: <Download size={14} />,
@@ -184,10 +216,18 @@ export function CommandPalette() {
       },
       {
         id: "theme",
-        label: theme === "dark" ? t.command.switchToLight : t.command.switchToDark,
-        icon: theme === "dark" ? <Sun size={14} /> : <Moon size={14} />,
+        label:
+          // 看**生效**主题而不是设置值:theme="system" 且系统深色时,
+          // 按设置值判断会显示"切换到深色",点了却还是深色
+          document.documentElement.dataset.theme === "dark"
+            ? t.command.switchToLight
+            : t.command.switchToDark,
+        icon: document.documentElement.dataset.theme === "dark" ? <Sun size={14} /> : <Moon size={14} />,
         group: t.command.groupCommands,
-        run: () => setTheme(theme === "dark" ? "light" : "dark"),
+        run: () =>
+          setTheme(
+            document.documentElement.dataset.theme === "dark" ? "light" : "dark",
+          ),
       },
     ];
     const samples_: Entry[] = samples.map((s) => ({
