@@ -14,6 +14,7 @@ import math
 import numpy as np
 import pytest
 
+from xrd_engine.api.commands import params_from_json
 from xrd_engine.models.types import (
     BackgroundParams,
     Curve,
@@ -233,3 +234,144 @@ class TestPipelineOrderAndFlags:
         curve = Curve(x=x, y=np.full_like(x, 100.0))
         result = run_pipeline(curve, PipelineParams(peaks=PeakDetectionParams()))
         assert result.peaks == []
+
+
+class TestStageCache:
+    """阶段缓存(§9.3)。**正确性优先于速度** —— 缓存返回错结果的代价
+    是一张画错的谱,而用户看不出那是缓存的问题。
+
+    键是**参数前缀**:背景依赖 (crop, background),平滑依赖
+    (crop, background, smoothing)。前缀不变即命中。
+    """
+
+    def test_same_params_hit_cache(self, lfp_curve):
+        from xrd_engine.processing.pipeline import (
+            _STAGE_CACHE,
+            clear_stage_cache,
+            run_pipeline,
+        )
+
+        params = params_from_json({
+            "background": {"enabled": True, "method": "asls"},
+            "smoothing": {"enabled": True, "window_length": 11},
+        })
+        clear_stage_cache()
+        r1 = run_pipeline(lfp_curve, params)
+        n1 = len(_STAGE_CACHE)
+        assert n1 >= 2, "背景与平滑都应进缓存"
+        r2 = run_pipeline(lfp_curve, params)
+        assert len(_STAGE_CACHE) == n1, "同参数不应新增缓存项"
+        np.testing.assert_allclose(r1.curve.y, r2.curve.y)
+
+    def test_changing_smoothing_reuses_background(self, lfp_curve):
+        """拖平滑窗口不该重算背景 —— 这是缓存存在的理由。"""
+        from xrd_engine.processing.pipeline import (
+            _STAGE_CACHE,
+            clear_stage_cache,
+            run_pipeline,
+        )
+
+        def key_names():
+            return sorted(k[1] for k in _STAGE_CACHE)
+
+        clear_stage_cache()
+        run_pipeline(lfp_curve, params_from_json({
+            "background": {"enabled": True, "method": "asls"},
+            "smoothing": {"enabled": True, "window_length": 11},
+        }))
+        bg_keys = {k for k in _STAGE_CACHE if k[1] == "background"}
+        assert len(bg_keys) == 1
+
+        # 只改平滑窗口
+        run_pipeline(lfp_curve, params_from_json({
+            "background": {"enabled": True, "method": "asls"},
+            "smoothing": {"enabled": True, "window_length": 21},
+        }))
+        bg_keys_after = {k for k in _STAGE_CACHE if k[1] == "background"}
+        assert bg_keys_after == bg_keys, "背景参数没变,不该新增背景缓存项"
+        assert len([k for k in _STAGE_CACHE if k[1] == "smoothing"]) == 2,             "平滑换了参数,应新增一项"
+
+    def test_changing_background_does_not_reuse_stale(self, lfp_curve):
+        """**反向用例**:改了背景参数必须重算。
+
+        键若只放单个字段(比如漏掉 smoothness),这里就会命中一个用旧
+        参数算出来的背景 —— 曲线看着正常,数值全错。
+        """
+        from xrd_engine.processing.pipeline import (
+            _STAGE_CACHE,
+            clear_stage_cache,
+            run_pipeline,
+        )
+
+        clear_stage_cache()
+        a = run_pipeline(lfp_curve, params_from_json({
+            "background": {"enabled": True, "method": "asls", "smoothness": 1e5},
+        }))
+        b = run_pipeline(lfp_curve, params_from_json({
+            "background": {"enabled": True, "method": "asls", "smoothness": 1e7},
+        }))
+        assert len([k for k in _STAGE_CACHE if k[1] == "background"]) == 2,             "不同 smoothness 必须是两个缓存项"
+        assert not np.allclose(a.background, b.background),             "不同 smoothness 的背景必须不同 —— 相同说明命中了旧缓存"
+
+    def test_changing_crop_does_not_reuse_stale(self, lfp_curve):
+        """crop 变了,背景必须在**裁剪后**的曲线上重算。"""
+        from xrd_engine.processing.pipeline import clear_stage_cache, run_pipeline
+
+        clear_stage_cache()
+        full = run_pipeline(lfp_curve, params_from_json({
+            "background": {"enabled": True, "method": "asls"},
+        }))
+        cropped = run_pipeline(lfp_curve, params_from_json({
+            "crop": {"enabled": True, "x_min": 20.0, "x_max": 60.0},
+            "background": {"enabled": True, "method": "asls"},
+        }))
+        assert full.curve.x.size != cropped.curve.x.size
+        assert cropped.background.size == cropped.curve.x.size
+
+    def test_different_curve_does_not_reuse(self, lfp_curve):
+        """换一条曲线不能命中另一条的缓存。"""
+        from xrd_engine.models.types import Curve
+        from xrd_engine.processing.pipeline import clear_stage_cache, run_pipeline
+
+        clear_stage_cache()
+        params = params_from_json({"background": {"enabled": True, "method": "asls"}})
+        a = run_pipeline(lfp_curve, params)
+        other = Curve(
+            x=lfp_curve.x.copy(),
+            y=lfp_curve.y * 2.0,          # 同样的 x,不同的 y
+            x_axis_type=lfp_curve.x_axis_type,
+            wavelength=lfp_curve.wavelength,
+        )
+        b = run_pipeline(other, params)
+        assert not np.allclose(a.background, b.background),             "指纹必须能区分同一 x 网格上的不同曲线"
+
+    def test_cache_is_bounded(self, lfp_curve):
+        """有界 —— 否则长时间拖动会把每条中间曲线都留在内存里。"""
+        from xrd_engine.processing.pipeline import (
+            _STAGE_CACHE,
+            _STAGE_CACHE_LIMIT,
+            clear_stage_cache,
+            run_pipeline,
+        )
+
+        clear_stage_cache()
+        for w in range(5, 60, 2):
+            run_pipeline(lfp_curve, params_from_json({
+                "background": {"enabled": True, "method": "asls"},
+                "smoothing": {"enabled": True, "window_length": w},
+            }))
+        assert len(_STAGE_CACHE) <= _STAGE_CACHE_LIMIT
+
+    def test_clear_stage_cache(self, lfp_curve):
+        from xrd_engine.processing.pipeline import (
+            _STAGE_CACHE,
+            clear_stage_cache,
+            run_pipeline,
+        )
+
+        run_pipeline(lfp_curve, params_from_json({
+            "background": {"enabled": True, "method": "asls"},
+        }))
+        assert _STAGE_CACHE
+        clear_stage_cache()
+        assert not _STAGE_CACHE

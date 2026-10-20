@@ -602,28 +602,91 @@ committing → idle
 ## 10.4 与引擎的接口(command 清单)
 
 ```text
-invoke("engine", cmd)  — 全部经 Rust 转发到 sidecar(stdio 长度前缀帧,见 11.2)
+invoke("engine_command", { cmd, payload })  — 全部经 Rust 转发到 sidecar
+                                              (stdio 长度前缀帧,见 11.2)
 
-datasets.import { paths[], project_id, sample_id?, new_sample? } → { datasets[], curve_ref }
-datasets.list / get / curve { id, crop?, downsample? } → Envelope(binary)
-analysis.get_or_create { dataset_id }
-analysis.preview  { analysis_id, patch } → Envelope(binary, curve)
-analysis.commit   { analysis_id, pipeline_json }
-peaks.detect      { analysis_id | dataset_id } → peaks[]
-peaks.update_bounds { peak_id, left, right } → peak
-presets.apply     { preset_id, dataset_ids[] } → analyses[]
+—— 库与项目 ——
+projects.list / create { name, description? }
+samples.create  { project_id, name, temperature?, duration?, material?,
+                  batch?, wavelength?, notes? }
+samples.update  { id, name?, temperature?, duration?, material?, batch?,
+                  wavelength?, notes? }
+library.tree    → { samples[], batches[] }
+meta.rename     { table, id, name }
+meta.soft_delete { table, id } → { cascadedDatasets }
+meta.restore    { table, id, cascade_parent? } → { restoredAncestors[] }
+meta.file_path  { table: datasets|ec_cells, id } → { path, kind: source|stored }
+                (右键"在资源管理器中显示";原文件不在时回落库内副本)
+trash.list      { limit? } → { items[], total }
+meta.purge      { table, id } | { all: true }
+
+—— 数据与处理 ——
+datasets.import { paths[], project_id, sample_id?, new_sample?,
+                  batch_id?, batch_name?, x_column?, y_column?,
+                  x_axis_type?, wavelength?, import_anyway? }
+datasets.curve  { id, max_points?, x_min?, x_max? } → Envelope(binary)
+datasets.scan_folder { folder } → { files[], groups[] }   (只建议,不落库)
+analysis.preview { dataset_id, pipeline, max_points? } → Envelope(binary, curve)
+analysis.commit  { dataset_id, pipeline }
+
+—— 峰 ——
+peaks.detect      { analysis_id | dataset_id } → { peaks[], annotation }
+peaks.list        { analysis_id } → { peaks[] }
+peaks.annotate    { analysis_id | dataset_id } → { annotated[], annotation }
+peaks.update_bounds { peak_id, left, right } → { peak }
+
+—— 高镍分析 ——
+profiles.list / create
+domain.high_ni.analyze { dataset_id, profile_id?, modules?, fit? }
+domain.high_ni.get     { dataset_id | analysis_id } → { found, result, stale }
+trend.series           { project_id, metric?, x_axis? } → { points[] }
+
+—— 导出 ——
 export.figure / export.data / export.peaks
-meta.rename       { table, id, name }
-meta.soft_delete  { table, id } → { cascadedDatasets }
-meta.restore      { table, id, cascade_parent? } → { restoredAncestors[] }
-trash.list        { limit? } → { items[], total }
-meta.purge        { table, id } | { all: true }
+
+—— 电化学(LAND dQ/dV 归因,详见 docs/DEVELOPMENT_EC.md) ——
+ec.preview          { path } → { session, qa, n_cycles, mass_mg_estimate }
+ec.import           { paths[], project_id, sample_id? | new_sample?,
+                      active_mass_mg?, import_anyway? }
+ec.cells            { sample_id } → { cells[] }
+ec.cell_overview    { cell_id } → { session, qa, cycles[] }
+ec.dqdv_compute     { cell_id, params? } → { peaks[], tracks[], paramsHash }
+ec.dqdv_state       { cell_id } → { computed, paramsHash }
+ec.dqdv_result      { cell_id } → { computed, params, peaks[], tracks[] }
+                    (读回上次固化的明细+参数快照,重启后免重算)
+ec.dqdv_curve       { cell_id, cycle, direction } → Envelope(binary, v/dqdv)
+ec.dqdv_waterfall   { cell_id, direction, step } → Envelope(binary, matrix)
+ec.attribution_run  { cell_id, params? } → { cycles[], conclusion, ... }
+ec.attribution_get  { cell_id } → { computed, stale, ... }
+ec.export           { cell_id, kind: cycles|peaks|attribution }
+
+—— 预设 ——
+presets.save / list / apply
 ```
 
 `peaks.detect` 同时接受 `dataset_id` —— 前端手里通常只有它,不关心 analysis
 的内部 id,支持它能省掉一次多余往返。
 
-`trash.list` 的 `kind` 用**表名**(`projects`/`samples`/`datasets`),前端可以
+**曲线数据的信封**(§9.1):`data` 里不再有 `x`/`y` 数组,取而代之的是
+`data.__bin__`(描述)+ 帧尾的二进制体。JSON 头约 200 字节,数组按
+`layout` 顺序切成连续 `f32[n]` 段。前端解成 `Float32Array` 直喂 ECharts。
+
+> **2026-09-18 修订:** 上表按实际实现重写。原清单里的 `datasets.list` /
+> `datasets.get` / `analysis.get_or_create` **从未实现**(功能被内联进
+> `library.tree` 与 `_active_analysis`),而本轮新增的
+> `samples.create` / `samples.update` / `datasets.scan_folder` /
+> `domain.high_ni.get` / `trend.series` 也不在旧清单里。
+>
+> **2026-09-24 修订:** `presets.*`(S5,Inspector 参数预设区)与
+> `peaks.update_bounds`(M4,峰表双击左界/右界)已接上 UI;
+> `peaks.list` 仍无前端调用(峰表走 preview/state 内存峰)。
+>
+> **2026-10-06 修订:** 新增 `ec.*` 命名空间(电化学 LAND 数据,v7 schema:
+> `ec_cells`/`ec_cycles`/`ec_analyses`)。`meta.*` 的 table 白名单与回收站
+> 同步扩展了 `ec_cells`。engine 依赖新增 `openpyxl`。
+
+`trash.list` 的 `kind` 用**表名**(`projects`/`samples`/`batches`/`datasets`/
+`ec_cells`),前端可以
 把 `item.kind` 直接透传给 `meta.restore` / `meta.purge`,不必再维护一张
 「单数 ↔ 表名」映射表。
 
@@ -681,6 +744,15 @@ meta.purge        { table, id } | { all: true }
 
 > 方法论不变:**Vertical Slice**。每阶段产出可运行、可给人用的软件,不做分层瀑布。
 > 变化:**每阶段出口条件改为可测清单**,并前移三个高风险验证(打包实验、网格检测、性能基准)。
+
+> **本文档是需求与验收标准,不记录实时进度。** 各里程碑的当前完成情况、
+> 已修缺陷与下一步计划见 `PROGRESS.md`;高镍路线的阶段状态见
+> `docs/DEVELOPMENT_HIGH_NI.md`。下面各节的 `□` 是**验收条件**,
+> 勾选状态以 `PROGRESS.md` 为准。
+>
+> 截至 2026-09-18 的概览:M1/M3 完成;M2 差 sidecar 打包决策实验;
+> M4 差灵敏度映射表校准与 Bounds 编辑 UI;M5 差 **Preset UI(S5)** 与 SVG/PDF;
+> M6 未开始。**S4 系列对比**与**结构趋势图**不在 M1–M6 里,已额外交付。
 
 ## 12.0 仓库与工程基线
 

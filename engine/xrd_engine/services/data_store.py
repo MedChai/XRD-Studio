@@ -110,31 +110,13 @@ class DataStore:
         stored = f"data/{ulid}/{dest.name}"
         return stored, file_hash
 
-    # --- 曲线读写 ---
-
-    def save_curve_cache(
-        self,
-        dataset_id: int,
-        x: np.ndarray,
-        y: np.ndarray,
-        kind: str = "processed",
-    ) -> None:
-        """处理结果缓存(§9.3),存 .npy 到 cache/,可随时删除重建。"""
-        cache_dir = self.root / "cache"
-        np.save(cache_dir / f"ds{dataset_id}_{kind}_x.npy", x)
-        np.save(cache_dir / f"ds{dataset_id}_{kind}_y.npy", y)
-
-    def load_curve_cache(
-        self, dataset_id: int, kind: str = "processed"
-    ) -> tuple[np.ndarray, np.ndarray] | None:
-        cache_dir = self.root / "cache"
-        xf = cache_dir / f"ds{dataset_id}_{kind}_x.npy"
-        yf = cache_dir / f"ds{dataset_id}_{kind}_y.npy"
-        if xf.exists() and yf.exists():
-            return np.load(xf), np.load(yf)
-        return None
-
     # --- 删除 ---
+
+    # 注:这里曾有一对 save_curve_cache / load_curve_cache(把处理结果存成
+    # .npy 到 cache/)。**已删除** —— 它全仓库零调用,而且方向是错的:
+    # §9.3 要的是"拖动滑块时不重算",那需要的是**进程内**缓存(纳秒级),
+    # 而不是每次 preview 都往磁盘写两个 .npy。缓存实现见
+    # api/commands.py 的 Engine._curve_cache。
 
     def remove_stored(self, stored_path: str) -> bool:
         """永久删除一个 dataset 的存储目录 `data/<ULID>/`。
@@ -161,15 +143,6 @@ class DataStore:
 
         shutil.rmtree(ulid_dir, ignore_errors=True)
         return not ulid_dir.exists()
-
-    def remove_curve_cache(self, dataset_id: int) -> None:
-        """清掉该 dataset 的处理结果缓存(可重建,删不掉也无害)。"""
-        cache_dir = self.root / "cache"
-        for kind in ("processed", "raw"):
-            for axis in ("x", "y"):
-                (cache_dir / f"ds{dataset_id}_{kind}_{axis}.npy").unlink(
-                    missing_ok=True
-                )
 
     # --- 导出 ---
 

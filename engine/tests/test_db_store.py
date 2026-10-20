@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 
-import numpy as np
 import pytest
 
 from xrd_engine.database.db import Database
@@ -57,11 +56,65 @@ class TestSchema:
         )
         names = {r["name"] for r in rows}
         assert {"projects", "samples", "datasets", "analyses",
-                "peaks", "analysis_presets"} <= names
+                "peaks", "analysis_presets", "material_profiles",
+                "domain_results"} <= names
 
     def test_user_version(self, db):
+        from xrd_engine.database.db import SCHEMA_VERSION
+
         row = db.query_one("PRAGMA user_version")
-        assert row[0] == 1
+        assert row[0] == SCHEMA_VERSION
+
+    def test_peaks_has_annotation_columns(self, db):
+        """归属依据必须能落库,否则重新加载后前端只能显示"贡献 0%"。"""
+        cols = {r["name"] for r in db.query_all("PRAGMA table_info(peaks)")}
+        assert {"hkl", "hkl_confidence", "dominance", "hkl_candidates"} <= cols
+
+    def test_analyses_has_annotation_json(self, db):
+        """SCHEMA v6:晶面标注上下文必须能持久化,否则重启即丢。"""
+        cols = {r["name"] for r in db.query_all("PRAGMA table_info(analyses)")}
+        assert "annotation_json" in cols
+
+    def test_migration_v5_to_v6_is_idempotent(self, tmp_path):
+        """旧库(user_version=5,无 annotation_json)打开时只加列不重建。"""
+        import sqlite3
+
+        from xrd_engine.database.db import SCHEMA_VERSION
+
+        path = tmp_path / "legacy.db"
+        conn = sqlite3.connect(path)
+        conn.executescript(
+            """
+            CREATE TABLE analyses (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dataset_id INTEGER NOT NULL,
+                pipeline_json TEXT NOT NULL DEFAULT '{}',
+                is_active INTEGER NOT NULL DEFAULT 1
+            );
+            INSERT INTO analyses (dataset_id, pipeline_json) VALUES (1, '{}');
+            PRAGMA user_version=5;
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        database = Database(path)
+        # 两次打开都必须成功(幂等):第二次 user_version 已是 6,应跳过
+        database.close()
+        database = Database(path)
+        try:
+            cols = {
+                r["name"]
+                for r in database.query_all("PRAGMA table_info(analyses)")
+            }
+            assert "annotation_json" in cols
+            version = database.query_one("PRAGMA user_version")[0]
+            assert version == SCHEMA_VERSION
+            # 旧行必须原样保留(只加列,不重建表)
+            row = database.query_one("SELECT pipeline_json FROM analyses")
+            assert row is not None
+        finally:
+            database.close()
 
     def test_wal_mode(self, db):
         row = db.query_one("PRAGMA journal_mode")
@@ -208,16 +261,6 @@ class TestDataStore:
     def test_abs_path_blocks_escape(self, store):
         with pytest.raises(ValueError):
             store.abs_path("../../etc/passwd")
-
-    def test_curve_cache_roundtrip(self, store):
-        x = np.linspace(10.0, 80.0, 100)
-        y = np.sin(x)
-        store.save_curve_cache(7, x, y, kind="processed")
-        got = store.load_curve_cache(7, kind="processed")
-        assert got is not None
-        np.testing.assert_allclose(got[0], x)
-        np.testing.assert_allclose(got[1], y)
-        assert store.load_curve_cache(99) is None
 
     def test_export_path_no_overwrite(self, store):
         p1 = store.export_path("peaks.csv")

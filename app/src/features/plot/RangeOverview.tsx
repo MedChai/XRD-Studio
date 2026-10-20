@@ -27,7 +27,8 @@ function RangeOverviewInner() {
   const chartRef = useRef<echarts.ECharts | null>(null);
   const appliedZoom = useRef<string>("");
   const curve = useAnalysisStore((s) => s.curve);
-  const { zoom, xDomain } = usePlotStore();
+  const zoom = usePlotStore((s) => s.zoom);
+  const xDomain = usePlotStore((s) => s.xDomain);
 
   /** 缩略图**不加 offset、不做 offset 平移** —— 它表达的是"整条谱长什么样",
    * 不该跟着 Display 的纵向偏移一起动。 */

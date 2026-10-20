@@ -2,8 +2,11 @@
 
 import { create } from "zustand";
 import type {
+  AnnotationContext,
   CurvePayload,
+  AnalysisStateResult,
   PeakResult,
+  PeaksAnnotateResult,
   PreviewResult,
   PipelineParams,
   ProjectNode,
@@ -14,8 +17,25 @@ import type {
   TrashItem,
   TrashKind,
   TrashListResult,
+  EcAttributionState,
+  EcCellOverview,
+  EcCellSummary,
+  EcDqdvDetail,
+  EcDqdvParams,
+  EcWaterfallPayload,
 } from "../types/engine";
-import { engineCommand } from "../services/engine";
+import {
+  DISPLAY_MAX_POINTS,
+  ecAttributionGet,
+  ecAttributionRun,
+  ecCellOverview,
+  ecCells,
+  ecDqdvCompute,
+  ecDqdvResult,
+  ecDqdvWaterfall,
+  engineCommand,
+} from "../services/engine";
+import { t } from "../i18n";
 
 // 与 models/types.py 的 dataclass 默认值严格一致(§7.4 快照语义)
 export const DEFAULT_PIPELINE: PipelineParams = {
@@ -118,6 +138,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       return false;
     }
     await get().load();
+    // 电池列表里的名字也来自 ec.cells,重命名后侧栏要能刷出来
+    useEcStore.getState().invalidateCells();
     return true;
   },
 
@@ -129,6 +151,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     }
     // 回收站列表也要刷新:侧栏的徽标数与回收站对话框的内容都依赖它
     await Promise.all([get().load(), get().loadTrash()]);
+    useEcStore.getState().invalidateCells();
     // 删掉的若是当前选中的数据集,清空视图,避免继续显示一条已不存在的曲线
     const sel = useSelectionStore.getState();
     if (table === "datasets" && sel.datasetId === id) {
@@ -141,6 +164,13 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       if (!stillThere) {
         sel.selectDataset(null, null);
         useAnalysisStore.getState().clearDataset();
+      }
+    }
+    // 电化学:删 cell 或删其所属样品 → 清电池视图(cell 随样品隐式级联下线)
+    if ((table === "ec_cells" && sel.cellId === id) || table === "samples") {
+      if (sel.cellId != null) {
+        sel.selectCell(null, null);
+        useEcStore.getState().clearCell();
       }
     }
     const n = r.data.cascadedDatasets;
@@ -202,12 +232,17 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 interface SelectionState {
   sampleId: number | null;
   datasetId: number | null;
+  /** 选中的电化学 cell(ec_cells.id)。与 datasetId 互斥 —— 同一时刻
+   *  主工作区要么是 XRD 谱图,要么是电化学页面。 */
+  cellId: number | null;
   /** "ds:<id>" 形式的曲线显隐集合;null 表示全选 */
   hiddenCurves: Set<string> | null;
   /** 联动中枢(§35):点击表格行 ↔ 点击图中峰 */
   selectedPeakIndex: number | null;
   /** 传 null 表示清空选择(数据集被删除时) */
   selectDataset: (sampleId: number | null, datasetId: number | null) => void;
+  /** 选中一个电化学 cell(null 表示清空)。清空 dataset 侧,反之亦然。 */
+  selectCell: (sampleId: number | null, cellId: number | null) => void;
   toggleCurve: (key: string) => void;
   setSelectedPeak: (index: number | null) => void;
 }
@@ -215,10 +250,13 @@ interface SelectionState {
 export const useSelectionStore = create<SelectionState>((set) => ({
   sampleId: null,
   datasetId: null,
+  cellId: null,
   hiddenCurves: null,
   selectedPeakIndex: null,
   selectDataset: (sampleId, datasetId) =>
-    set({ sampleId, datasetId, selectedPeakIndex: null }),
+    set({ sampleId, datasetId, selectedPeakIndex: null, cellId: null }),
+  selectCell: (sampleId, cellId) =>
+    set({ sampleId, cellId, datasetId: null, selectedPeakIndex: null, hiddenCurves: null }),
   toggleCurve: (key) =>
     set((s) => {
       const cur = new Set(s.hiddenCurves ?? []);
@@ -228,6 +266,14 @@ export const useSelectionStore = create<SelectionState>((set) => ({
     }),
   setSelectedPeak: (selectedPeakIndex) => set({ selectedPeakIndex }),
 }));
+
+/** 对比曲线(多谱对比 S4)。只带显示所需的最小字段。 */
+export interface CompareCurve {
+  datasetId: number;
+  name: string;
+  color: string;
+  curve: CurvePayload;
+}
 
 // ---------------- plotStore ----------------
 
@@ -253,6 +299,10 @@ interface PlotState {
   zoom: { from: number; to: number } | null;
   /** 是否叠加显示背景曲线(§7.3 的 Show Background) */
   showBackground: boolean;
+  /** 当前 ECharts 实例提供的 PNG 导出函数。图表卸载时清空。 */
+  figureExporter: (() => string) | null;
+  /** SVG 导出:离屏用 svg renderer 重画同一 option,矢量可进矢量软件。 */
+  figureSvgExporter: (() => string) | null;
   setMode: (m: PlotState["mode"]) => void;
   setCrosshair: (v: boolean) => void;
   setShowLabels: (v: boolean) => void;
@@ -261,6 +311,23 @@ interface PlotState {
   setXDomain: (d: PlotState["xDomain"]) => void;
   setZoom: (z: PlotState["zoom"]) => void;
   setShowBackground: (v: boolean) => void;
+  setFigureExporter: (fn: (() => string) | null) => void;
+  setFigureSvgExporter: (fn: (() => string) | null) => void;
+  /** 叠加对比的曲线集合(S4 系列对比)。
+   *
+   * 与 `analysisStore.curve` 的分工:那条是**当前分析对象**(峰、指标都
+   * 挂在它身上);这里只是**显示层的参考曲线**,没有峰、没有处理参数,
+   * 唯一作用是画出来给用户横向比。因此不放进 analysisStore —— 放进去
+   * 会让"当前数据集"与"对比曲线"两个概念混在一起。
+   *
+   * 每项带自己的颜色与显示名(取 dataset 名),避免在图表里再去查库。 */
+  compareCurves: CompareCurve[];
+  addCompareCurve: (c: CompareCurve) => void;
+  removeCompareCurve: (datasetId: number) => void;
+  clearCompareCurves: () => void;
+  /** 每条曲线的垂直偏移(stacked 模式用;overlay 模式下为 0)。
+   * 不放进 CompareCurve 里是因为它随模式切换整体重算。 */
+  compareOffsets: Record<number, number>;
   /** Fit All:把缩放窗口设回全域。zoom 是唯一真相,两个图都订阅它自动跟随,
    * 所以不需要额外的"请求序号"来通知谁去执行。 */
   fitAll: () => void;
@@ -275,6 +342,10 @@ export const usePlotStore = create<PlotState>((set, get) => ({
   xDomain: null,
   zoom: null,
   showBackground: false,
+  figureExporter: null,
+  figureSvgExporter: null,
+  compareCurves: [],
+  compareOffsets: {} as Record<number, number>,
   setMode: (mode) => set({ mode }),
   setCrosshair: (crosshair) => set({ crosshair }),
   setShowLabels: (showLabels) => set({ showLabels }),
@@ -282,7 +353,31 @@ export const usePlotStore = create<PlotState>((set, get) => ({
   setCursor: (cursor) => set({ cursor }),
   setXDomain: (xDomain) => set({ xDomain }),
   setZoom: (zoom) => set({ zoom }),
+  addCompareCurve: (c) =>
+    set((s) => {
+      // 同一个数据集不叠加两次:重复添加会让两条参考曲线完全重合,
+      // 图上看不出问题(叠在一起),但图例多一项、删除时也分不清删哪条。
+      if (s.compareCurves.some((x) => x.datasetId === c.datasetId)) return s;
+      // 上限 6 条:再多颜色就分不清了,ECharts 图例会挤成一团,
+      // 而且每条都要占一份内存里的完整曲线。
+      if (s.compareCurves.length >= 6) return s;
+      return { compareCurves: [...s.compareCurves, c] };
+    }),
+  removeCompareCurve: (datasetId) =>
+    set((s) => {
+      const next = { ...s.compareOffsets };
+      delete next[datasetId];
+      return {
+        compareCurves: s.compareCurves.filter((x) => x.datasetId !== datasetId),
+        compareOffsets: next,
+      };
+    }),
+  clearCompareCurves: () => set({ compareCurves: [], compareOffsets: {} }),
+  setCompareOffsets: (compareOffsets: PlotState["compareOffsets"]) =>
+    set({ compareOffsets }),
   setShowBackground: (showBackground) => set({ showBackground }),
+  setFigureExporter: (figureExporter) => set({ figureExporter }),
+  setFigureSvgExporter: (figureSvgExporter) => set({ figureSvgExporter }),
   fitAll: () => {
     const d = get().xDomain;
     if (d) set({ zoom: { from: d[0], to: d[1] } });
@@ -306,9 +401,24 @@ interface AnalysisState {
    * 内存里的峰已经不是固化过的那批),peaks.detect 成功后置 false。
    * 没有这个标记,用户点完「检测峰」看不出到底有没有生效。 */
   peaksDirty: boolean;
+  /** 已持久化的晶面标注(analyses.annotation_json)。打开图即从库恢复,
+   *  不重算;点「标注晶面」才刷新。 */
+  annotation: AnnotationContext | null;
+  /** 当前 pipeline 与标注时不一致 → 保留旧标签但显示"已过期"提示。 */
+  annotationStale: boolean;
+  /** 正在后台/显式标注(全谱精修 1.5–4.5s,首次)。 */
+  annotationLoading: boolean;
+  /** peaks.detect 进行中(按钮 loading 与命令面板共用)。 */
+  detecting: boolean;
   /** 滑块拖动节流:cancel 旧请求语义由序号丢弃实现 */
   _previewSeq: number;
   _commitTimer: number | null;
+  /** 30ms 节流的 preview 定时器 id。新 patch/load/undo 时必须 clear ——
+   *  只靠序号丢结果会让废弃请求仍在引擎侧跑完整条 pipeline(排队堆积)。 */
+  _previewTimer: number | null;
+  /** Undo 帧合并:400ms 窗口内的连续 patch 只压一帧进 undoStack。
+   *  拖滑块每 30ms 一帧会把 50 格栈瞬间填满,Ctrl+Z 要按几十次才回到起点。 */
+  _lastUndoAt: number;
 
   loadDataset: (datasetId: number) => Promise<void>;
   /** 清空当前曲线与峰(数据集被删除时用) */
@@ -316,11 +426,84 @@ interface AnalysisState {
   patchPipeline: (patch: Partial<PipelineParams>) => void;
   /** peaks.detect 成功后调用:把固化后的峰写回并清 dirty */
   markPeaksCommitted: (peaks: PeakResult[]) => void;
+  /** 「检测峰」唯一实现:先 commit 落库参数,再让引擎正式寻峰写 peaks 表。
+   *  Inspector 按钮与命令面板共用 —— 此前面板里是空 patchPipeline({}),
+   *  语义完全不同(不 detect、不 commit、不清 dirty)。 */
+  detectPeaks: () => Promise<void>;
+  /** 强制重算晶面标注(「标注晶面」按钮唯一入口),成功后清 stale。
+   *  silent=true 时不弹 toast(后台自动补标用)。 */
+  recomputeAnnotation: (opts?: { silent?: boolean }) => Promise<void>;
   undo: () => void;
   redo: () => void;
 }
 
 const clone = (p: PipelineParams): PipelineParams => structuredClone(p);
+
+/** 标注是否已过期:annotation 的 pipelineHash 与当前不一致。
+ *  任何一环缺信息(从未标注/旧数据无 hash)都视为不过期 —— 误报 stale
+ *  会诱导用户反复点重算。 */
+function isAnnotationStale(
+  hash: string | undefined,
+  annotation: AnnotationContext | null,
+): boolean {
+  if (!annotation || !hash) return false;
+  return (annotation.pipelineHash ?? "") !== hash;
+}
+
+/** 把 annotate 返回的标注按 position 合并进当前峰表(容差=网格步长)。 */
+function mergeAnnotatedPeaks(
+  current: PeakResult[],
+  annList: PeaksAnnotateResult["annotated"],
+): { merged: PeakResult[]; matched: number } {
+  if (!current.length || !annList.length) return { merged: current, matched: 0 };
+  const step = current.length > 1
+    ? Math.min(
+        ...current.slice(1).map((p, i) => Math.abs(p.position - current[i].position)),
+      )
+    : 0.02;
+  const tol = Math.max(step, 0.02);
+  let matched = 0;
+  const merged = current.map((p) => {
+    const match = annList.find((a) => Math.abs(a.position - p.position) <= tol);
+    if (!match) return p;
+    matched += 1;
+    return {
+      ...p,
+      hkl: match.hkl_label ?? null,
+      hkl_confidence: match.hkl_confidence ?? null,
+      dominance: match.dominance ?? null,
+      hkl_candidates: match.candidates ?? null,
+    };
+  });
+  return { merged, matched };
+}
+
+function mergePipeline(raw: Partial<PipelineParams>): PipelineParams {
+  return {
+    crop: { ...DEFAULT_PIPELINE.crop, ...(raw.crop ?? {}) },
+    background: { ...DEFAULT_PIPELINE.background, ...(raw.background ?? {}) },
+    smoothing: { ...DEFAULT_PIPELINE.smoothing, ...(raw.smoothing ?? {}) },
+    normalization: { ...DEFAULT_PIPELINE.normalization, ...(raw.normalization ?? {}) },
+    peaks: { ...DEFAULT_PIPELINE.peaks, ...(raw.peaks ?? {}) },
+  };
+}
+
+function syncPlotDomain(curve: CurvePayload): void {
+  if (curve.x.length === 0) {
+    usePlotStore.getState().setXDomain(null);
+    usePlotStore.getState().setZoom(null);
+    return;
+  }
+  const next: [number, number] = [curve.x[0], curve.x[curve.x.length - 1]];
+  const plot = usePlotStore.getState();
+  const previous = plot.xDomain;
+  plot.setXDomain(next);
+  if (plot.zoom && previous && (previous[0] !== next[0] || previous[1] !== next[1])) {
+    const from = Math.max(next[0], plot.zoom.from);
+    const to = Math.min(next[1], plot.zoom.to);
+    plot.setZoom(from < to ? { from, to } : null);
+  }
+}
 
 export const useAnalysisStore = create<AnalysisState>((set, get) => ({
   pipeline: clone(DEFAULT_PIPELINE),
@@ -332,31 +515,87 @@ export const useAnalysisStore = create<AnalysisState>((set, get) => ({
   redoStack: [],
   loadedDatasetId: null,
   peaksDirty: false,
+  annotation: null,
+  annotationStale: false,
+  annotationLoading: false,
+  detecting: false,
   _previewSeq: 0,
   _commitTimer: null,
+  _previewTimer: null,
+  _lastUndoAt: 0,
 
   loadDataset: async (datasetId) => {
+    const previousTimer = get()._commitTimer;
+    if (previousTimer) window.clearTimeout(previousTimer);
+    const previousPreview = get()._previewTimer;
+    if (previousPreview) window.clearTimeout(previousPreview);
+    const seq = get()._previewSeq + 1;
+    set({
+      _previewSeq: seq,
+      _commitTimer: null,
+      _previewTimer: null,
+      loadedDatasetId: datasetId,
+      curve: null,
+      peaks: [],
+      peaksDirty: false,
+      annotation: null,
+      annotationStale: false,
+      annotationLoading: false,
+      status: "previewing",
+      undoStack: [],
+      redoStack: [],
+    });
+
+    // 先取原始曲线,让数据集切换在几十到几百毫秒内有可见反馈;
+    // analysis.state 随后恢复该数据集自己的 pipeline 与正式峰结果。
     const r = await engineCommand<CurvePayload>("datasets.curve", {
       id: datasetId,
+      max_points: DISPLAY_MAX_POINTS,
     });
-    if (r.ok) {
-      set({
-        curve: r.data,
-        loadedDatasetId: datasetId,
-        peaks: [],
-        peaksDirty: false,
-        status: "idle",
-      });
-      // 新曲线的值域 + 清空缩放窗口。**不清 zoom 会残留上一条曲线的 2θ
-      // 窗口**,切到值域不同的曲线时表现为一张空图。
-      // 用首尾点而非 Math.min(...x):15k 点展开成参数会爆栈;曲线保证升序。
-      const x = r.data.x;
-      usePlotStore.getState().setXDomain(x.length ? [x[0], x[x.length - 1]] : null);
-      usePlotStore.getState().setZoom(null);
-      // 载入即做一次默认寻峰预览
-      get().patchPipeline({});
-    } else {
+    if (seq !== get()._previewSeq) return;
+    if (!r.ok) {
       set({ status: "idle" });
+      useUiStore.getState().showToast("error", r.error);
+      return;
+    }
+
+    set({ curve: r.data });
+    syncPlotDomain(r.data);
+    usePlotStore.getState().setZoom(null);
+
+    const state = await engineCommand<AnalysisStateResult>("analysis.state", {
+      dataset_id: datasetId,
+      max_points: DISPLAY_MAX_POINTS,
+    });
+    if (seq !== get()._previewSeq) return;
+    if (!state.ok) {
+      set({ status: "idle" });
+      useUiStore.getState().showToast("error", state.error);
+      return;
+    }
+
+    // 打开图只读库(annotation_json + peaks 表),零精修 —— 亚秒见标签。
+    const annotation = state.data.annotation ?? null;
+    const stale = isAnnotationStale(state.data.pipelineHash, annotation);
+    set({
+      pipeline: mergePipeline(state.data.pipeline),
+      curve: state.data.curve,
+      peaks: state.data.peaks,
+      peaksDirty: !state.data.peaksStored,
+      smoothingAffectsMetrics: state.data.smoothingAffectsMetrics,
+      annotation,
+      annotationStale: stale,
+      status: "idle",
+      undoStack: [],
+      redoStack: [],
+    });
+    syncPlotDomain(state.data.curve);
+
+    // 从未标注过但已有峰 → 后台补一次标注(用户诉求:打开图自动标注
+    // 并保存)。非阻塞:曲线已上屏,精修(1.5–4.5s 首次)在后台跑,
+    // 期间滑块/缩放照常可用;完成后落库,下次打开即读库瞬时。
+    if (!annotation && state.data.peaks.length > 0) {
+      void get().recomputeAnnotation({ silent: true });
     }
   },
 
@@ -366,6 +605,9 @@ export const useAnalysisStore = create<AnalysisState>((set, get) => ({
       peaks: [],
       loadedDatasetId: null,
       peaksDirty: false,
+      annotation: null,
+      annotationStale: false,
+      annotationLoading: false,
       status: "idle",
       smoothingAffectsMetrics: false,
       undoStack: [],
@@ -377,30 +619,114 @@ export const useAnalysisStore = create<AnalysisState>((set, get) => ({
 
   markPeaksCommitted: (peaks) => set({ peaks, peaksDirty: false }),
 
+  detectPeaks: async () => {
+    const dsId = get().loadedDatasetId;
+    if (dsId == null || get().detecting) return;
+    set({ detecting: true });
+    try {
+      // Detect Peaks 是「固化」动作:先把当前参数落库(commit),再让
+      // 引擎按落库的参数正式跑一遍寻峰、写进 peaks 表。
+      await engineCommand("analysis.commit", {
+        dataset_id: dsId,
+        pipeline: get().pipeline,
+      });
+      const r = await engineCommand<{ peaks: PeakResult[] }>("peaks.detect", {
+        dataset_id: dsId,
+      });
+      if (!r.ok) {
+        useUiStore.getState().showToast("error", r.error);
+        return;
+      }
+      if (get().loadedDatasetId !== dsId) return;
+      get().markPeaksCommitted(r.data.peaks);
+      useUiStore.getState().showToast("success", t.inspector.detected(r.data.peaks.length));
+    } finally {
+      set({ detecting: false });
+    }
+  },
+
+  recomputeAnnotation: async (opts) => {
+    const dsId = get().loadedDatasetId;
+    if (dsId == null || get().annotationLoading) return;
+    set({ annotationLoading: true });
+    try {
+      const r = await engineCommand<PeaksAnnotateResult>("peaks.annotate", {
+        dataset_id: dsId,
+      });
+      // 数据集可能已切走:丢弃过期结果
+      if (get().loadedDatasetId !== dsId) return;
+      if (!r.ok) {
+        if (!opts?.silent) useUiStore.getState().showToast("error", r.error);
+        return;
+      }
+      if (r.data.annotation) {
+        set({ annotation: r.data.annotation, annotationStale: false });
+      }
+      const current = get().peaks;
+      const { merged, matched } = mergeAnnotatedPeaks(current, r.data.annotated);
+      if (current.length && r.data.annotated.length && matched === r.data.annotated.length) {
+        set({ peaks: merged });
+      } else if (current.length && r.data.annotated.length && matched > 0) {
+        set({ peaks: merged });
+        if (!opts?.silent) {
+          useUiStore.getState().showToast(
+            "error",
+            t.inspector.annotatePartial(matched, r.data.annotated.length),
+          );
+        }
+      }
+      if (!opts?.silent) {
+        useUiStore.getState().showToast(
+          "success",
+          t.inspector.annotatedHkl(r.data.count),
+        );
+      }
+    } finally {
+      set({ annotationLoading: false });
+    }
+  },
+
   patchPipeline: (patch) => {
     const s = get();
     const next = { ...clone(s.pipeline), ...patch };
+    // Undo 帧合并(400ms):同一次拖动产生的连续 patch 只压一帧。
+    // 首帧总是入栈(_lastUndoAt=0),之后窗口内的 patch 不再入栈 ——
+    // 一次 Ctrl+Z 就能回到这次拖动开始前的状态。
+    const now = Date.now();
+    const coalesce = now - s._lastUndoAt < 400;
     set((st) => ({
       pipeline: next,
       status: "previewing",
       // 参数变了 → 内存里的峰已不是固化过的那批
       peaksDirty: true,
-      undoStack: [...st.undoStack.slice(-49), st.pipeline],
+      undoStack: coalesce
+        ? st.undoStack
+        : [...st.undoStack.slice(-49), st.pipeline],
       redoStack: [],
+      _lastUndoAt: coalesce ? st._lastUndoAt : now,
     }));
 
     // 300ms 无新输入 → committing(§10.3)
     if (s._commitTimer) window.clearTimeout(s._commitTimer);
+    if (s._previewTimer) window.clearTimeout(s._previewTimer);
     const seq = ++get()._previewSeq;
 
-    // 引擎类参数:节流发送,乱序丢弃
+    // 引擎类参数:节流发送,乱序丢弃。拖动中 compute_peak_metrics=false
+    // —— 跳过 FWHM/Area(它们是拖动延迟的主要来源之一),只保曲线跟手;
+    // commit 前的收尾 preview 再传 true 把度量补全。
     const dsId = s.loadedDatasetId;
     if (dsId != null) {
-      window.setTimeout(async () => {
+      const previewTimer = window.setTimeout(async () => {
         if (seq !== get()._previewSeq) return; // cancel 语义
         const r = await engineCommand<PreviewResult>("analysis.preview", {
           dataset_id: dsId,
           pipeline: get().pipeline,
+          max_points: DISPLAY_MAX_POINTS,
+          annotate: false,
+          // 标注不重算,但把 annotation_json 的 labels 快照按位置合回
+          // —— 拖滑块时图上的晶面标签不消失(查库合并,亚毫秒)。
+          restoreAnnotation: true,
+          compute_peak_metrics: false,
         });
         if (seq !== get()._previewSeq) return;
         if (r.ok) {
@@ -408,15 +734,42 @@ export const useAnalysisStore = create<AnalysisState>((set, get) => ({
             curve: r.data.curve,
             peaks: r.data.peaks,
             smoothingAffectsMetrics: r.data.smoothingAffectsMetrics,
+            annotationStale: isAnnotationStale(
+              r.data.pipelineHash,
+              get().annotation,
+            ),
           });
+          syncPlotDomain(r.data.curve);
+        } else {
+          set({ status: "idle" });
+          useUiStore.getState().showToast("error", r.error);
         }
       }, 30);
+      set({ _previewTimer: previewTimer });
     }
 
     set({
       _commitTimer: window.setTimeout(async () => {
         if (dsId != null) {
           set({ status: "committing" });
+          // 收尾 preview:把拖动中跳过的 FWHM/Area 补回来,再落库。
+          // 不补的话峰表会在拖动后一直显示 "—",直到下次「检测峰」。
+          const finalSeq = get()._previewSeq;
+          const fin = await engineCommand<PreviewResult>("analysis.preview", {
+            dataset_id: dsId,
+            pipeline: get().pipeline,
+            max_points: DISPLAY_MAX_POINTS,
+            annotate: false,
+            restoreAnnotation: true,
+            compute_peak_metrics: true,
+          });
+          if (finalSeq === get()._previewSeq && fin.ok) {
+            set({
+              curve: fin.data.curve,
+              peaks: fin.data.peaks,
+              smoothingAffectsMetrics: fin.data.smoothingAffectsMetrics,
+            });
+          }
           await engineCommand("analysis.commit", {
             dataset_id: dsId,
             pipeline: get().pipeline,
@@ -431,10 +784,20 @@ export const useAnalysisStore = create<AnalysisState>((set, get) => ({
     const s = get();
     const prev = s.undoStack[s.undoStack.length - 1];
     if (!prev) return;
+    // 拖完 300ms 内按 Ctrl+Z:旧 commit/preview 定时器必须清掉,否则它们会用
+    // get().pipeline 再跑一次(值可能已变对,但多一次写库与状态抖动)。
+    if (s._commitTimer) window.clearTimeout(s._commitTimer);
+    if (s._previewTimer) window.clearTimeout(s._previewTimer);
     set((st) => ({
       pipeline: prev,
       undoStack: st.undoStack.slice(0, -1),
       redoStack: [...st.redoStack, st.pipeline],
+      peaksDirty: true,
+      status: "previewing",
+      _commitTimer: null,
+      _previewTimer: null,
+      // undo 后立即再调参应开新帧,不与刚结束的拖动窗口合并
+      _lastUndoAt: 0,
     }));
     if (s.loadedDatasetId != null) {
       // Undo 复用 preview→commit 通路(§10.5),不走旁门。
@@ -445,15 +808,30 @@ export const useAnalysisStore = create<AnalysisState>((set, get) => ({
       void engineCommand<PreviewResult>("analysis.preview", {
         dataset_id: s.loadedDatasetId,
         pipeline: prev,
+        max_points: DISPLAY_MAX_POINTS,
+        annotate: false,
+        restoreAnnotation: true,
       }).then((r) => {
         if (seq !== get()._previewSeq) return;
-        if (r.ok) {
-          set({
-            curve: r.data.curve,
-            peaks: r.data.peaks,
-            smoothingAffectsMetrics: r.data.smoothingAffectsMetrics,
-          });
+        if (!r.ok) {
+          set({ status: "idle" });
+          useUiStore.getState().showToast("error", r.error);
+          return;
         }
+        set({
+          curve: r.data.curve,
+          peaks: r.data.peaks,
+          smoothingAffectsMetrics: r.data.smoothingAffectsMetrics,
+          annotationStale: isAnnotationStale(r.data.pipelineHash, get().annotation),
+          status: "committing",
+        });
+        syncPlotDomain(r.data.curve);
+        return engineCommand("analysis.commit", {
+          dataset_id: s.loadedDatasetId,
+          pipeline: prev,
+        }).then(() => {
+          if (seq === get()._previewSeq) set({ status: "idle" });
+        });
       });
     }
   },
@@ -462,35 +840,288 @@ export const useAnalysisStore = create<AnalysisState>((set, get) => ({
     const s = get();
     const nxt = s.redoStack[s.redoStack.length - 1];
     if (!nxt) return;
+    if (s._commitTimer) window.clearTimeout(s._commitTimer);
+    if (s._previewTimer) window.clearTimeout(s._previewTimer);
     set((st) => ({
       pipeline: nxt,
       redoStack: st.redoStack.slice(0, -1),
       undoStack: [...st.undoStack, st.pipeline],
+      peaksDirty: true,
+      status: "previewing",
+      _commitTimer: null,
+      _previewTimer: null,
+      _lastUndoAt: 0,
     }));
     if (s.loadedDatasetId != null) {
       const seq = ++get()._previewSeq;
       void engineCommand<PreviewResult>("analysis.preview", {
         dataset_id: s.loadedDatasetId,
         pipeline: nxt,
+        max_points: DISPLAY_MAX_POINTS,
+        annotate: false,
+        restoreAnnotation: true,
       }).then((r) => {
         if (seq !== get()._previewSeq) return;
-        if (r.ok) {
-          set({
-            curve: r.data.curve,
-            peaks: r.data.peaks,
-            smoothingAffectsMetrics: r.data.smoothingAffectsMetrics,
-          });
+        if (!r.ok) {
+          set({ status: "idle" });
+          useUiStore.getState().showToast("error", r.error);
+          return;
         }
+        set({
+          curve: r.data.curve,
+          peaks: r.data.peaks,
+          smoothingAffectsMetrics: r.data.smoothingAffectsMetrics,
+          annotationStale: isAnnotationStale(r.data.pipelineHash, get().annotation),
+          status: "committing",
+        });
+        syncPlotDomain(r.data.curve);
+        return engineCommand("analysis.commit", {
+          dataset_id: s.loadedDatasetId,
+          pipeline: nxt,
+        }).then(() => {
+          if (seq === get()._previewSeq) set({ status: "idle" });
+        });
       });
     }
   },
 }));
 
-// ---------------- uiStore ----------------
+// ---------------- ecStore(电化学)----------------
+
+/** dQ/dV 参数的编辑态(带默认值,与引擎 DQDVParams 默认一致)。 */
+export interface EcDqdvEditableParams {
+  dv_mv: number;
+  sg_window: number;
+  sg_poly: number;
+  v_min: number;
+  v_max: number;
+  mass_mg: number | null;
+}
+
+const DEFAULT_EC_PARAMS: EcDqdvEditableParams = {
+  dv_mv: 2.0,
+  sg_window: 11,
+  sg_poly: 3,
+  v_min: 2.9,
+  v_max: 4.32,
+  mass_mg: null, // null = 用导入时记录的活性物质质量
+};
+
+interface EcState {
+  /** 侧栏树:每个样品下的 cell(懒加载缓存,导入/删除后 invalidate)。 */
+  cellsBySample: Record<number, EcCellSummary[]>;
+  loadCells: (sampleId: number, force?: boolean) => Promise<void>;
+  invalidateCells: () => void;
+
+  /** 当前打开的 cell。 */
+  loadedCellId: number | null;
+  overview: EcCellOverview | null;
+  loadingCell: boolean;
+
+  /** 引擎里是否已有持久化的 dQ/dV 计算(跨会话)。打开 cell 时经
+   *  ec.dqdv_result 读回峰/轨迹明细与当时的参数快照 —— 重启后无需重算。 */
+  dqdvComputed: boolean;
+  dqdvResult: EcDqdvDetail | null;
+  params: EcDqdvEditableParams;
+  /** 参数改过未重算(「参数已修改」徽标)。 */
+  paramsDirty: boolean;
+  computing: boolean;
+  /** 瀑布矩阵(一次拉取,本地切换;按 paramsHash 丢弃)。 */
+  waterfall: EcWaterfallPayload | null;
+  waterfallDirection: "charge" | "discharge";
+  waterfallStep: number;
+
+  attribution: EcAttributionState;
+  attributionRunning: boolean;
+
+  loadCell: (cellId: number) => Promise<void>;
+  clearCell: () => void;
+  patchParams: (patch: Partial<EcDqdvEditableParams>) => void;
+  computeDqdv: () => Promise<void>;
+  loadWaterfall: (direction: "charge" | "discharge", step: number) => Promise<void>;
+  setWaterfallOptions: (direction: "charge" | "discharge", step: number) => void;
+  runAttribution: () => Promise<void>;
+}
+
+export const useEcStore = create<EcState>((set, get) => ({
+  cellsBySample: {},
+  loadCells: async (sampleId, force = false) => {
+    if (!force && get().cellsBySample[sampleId]) return;
+    const r = await ecCells(sampleId);
+    if (!r.ok) {
+      useUiStore.getState().showToast("error", r.error);
+      return;
+    }
+    set((s) => ({ cellsBySample: { ...s.cellsBySample, [sampleId]: r.data.cells } }));
+  },
+  invalidateCells: () => set({ cellsBySample: {} }),
+
+  loadedCellId: null,
+  overview: null,
+  loadingCell: false,
+
+  dqdvComputed: false,
+  dqdvResult: null,
+  params: { ...DEFAULT_EC_PARAMS },
+  paramsDirty: false,
+  computing: false,
+  waterfall: null,
+  waterfallDirection: "charge",
+  waterfallStep: 10,
+
+  attribution: { computed: false },
+  attributionRunning: false,
+
+  loadCell: async (cellId) => {
+    set({
+      loadedCellId: cellId,
+      overview: null,
+      loadingCell: true,
+      dqdvComputed: false,
+      dqdvResult: null,
+      paramsDirty: false,
+      waterfall: null,
+      attribution: { computed: false },
+    });
+    const [ov, res, att] = await Promise.all([
+      ecCellOverview(cellId),
+      ecDqdvResult(cellId),
+      ecAttributionGet(cellId),
+    ]);
+    // cell 可能已被切走/删除:丢弃过期结果
+    if (get().loadedCellId !== cellId) return;
+    set({ loadingCell: false });
+    if (!ov.ok) {
+      useUiStore.getState().showToast("error", ov.error);
+      useSelectionStore.getState().selectCell(null, null);
+      return;
+    }
+    // 读回上次固化的明细:UI 参数直接对齐当时的快照,徽标从干净态开始
+    const stored = res.ok && res.data.computed ? res.data : null;
+    set({
+      overview: ov.data,
+      params: stored
+        ? {
+            dv_mv: stored.params.dv_mv ?? DEFAULT_EC_PARAMS.dv_mv,
+            sg_window: stored.params.sg_window ?? DEFAULT_EC_PARAMS.sg_window,
+            sg_poly: stored.params.sg_poly ?? DEFAULT_EC_PARAMS.sg_poly,
+            v_min: stored.params.v_min ?? DEFAULT_EC_PARAMS.v_min,
+            v_max: stored.params.v_max ?? DEFAULT_EC_PARAMS.v_max,
+            mass_mg: stored.params.mass_mg ?? null,
+          }
+        : { ...DEFAULT_EC_PARAMS, mass_mg: null },
+      dqdvComputed: stored != null,
+      dqdvResult: stored,
+      paramsDirty: false,
+      attribution: att.ok ? att.data : { computed: false },
+    });
+  },
+
+  clearCell: () =>
+    set({
+      loadedCellId: null,
+      overview: null,
+      loadingCell: false,
+      dqdvComputed: false,
+      dqdvResult: null,
+      params: { ...DEFAULT_EC_PARAMS },
+      paramsDirty: false,
+      computing: false,
+      waterfall: null,
+      attribution: { computed: false },
+    }),
+
+  patchParams: (patch) =>
+    set((s) => ({ params: { ...s.params, ...patch }, paramsDirty: true })),
+
+  computeDqdv: async () => {
+    const id = get().loadedCellId;
+    if (id == null || get().computing) return;
+    set({ computing: true });
+    try {
+      // mass_mg 为 null 时不传,引擎回落到 cell 的 active_mass_mg
+      const p = get().params;
+      const params: EcDqdvParams = {
+        dv_mv: p.dv_mv,
+        sg_window: p.sg_window,
+        sg_poly: p.sg_poly,
+        v_min: p.v_min,
+        v_max: p.v_max,
+        ...(p.mass_mg != null ? { mass_mg: p.mass_mg } : {}),
+      };
+      const r = await ecDqdvCompute(id, params);
+      if (get().loadedCellId !== id) return;
+      if (!r.ok) {
+        useUiStore.getState().showToast("error", r.error);
+        return;
+      }
+      set({
+        dqdvResult: r.data,
+        dqdvComputed: true,
+        paramsDirty: false,
+        waterfall: null, // 参数变了,旧矩阵作废
+      });
+      useUiStore.getState().showToast(
+        "success",
+        t.echem.dqdvDone(r.data.nCurves, r.data.nPeaks),
+      );
+    } finally {
+      set({ computing: false });
+    }
+  },
+
+  setWaterfallOptions: (direction, step) => {
+    const cur = get().waterfall;
+    // 方向或步长变了,矩阵不再匹配 → 清缓存待重取
+    if (cur && (cur.direction !== direction || cur.step !== step)) {
+      set({ waterfall: null });
+    }
+    set({ waterfallDirection: direction, waterfallStep: step });
+  },
+
+  loadWaterfall: async (direction, step) => {
+    const id = get().loadedCellId;
+    const cur = get().waterfall;
+    if (id == null) return;
+    if (cur && cur.direction === direction && cur.step === step) return;
+    const r = await ecDqdvWaterfall(id, direction, step);
+    if (get().loadedCellId !== id) return;
+    if (!r.ok) {
+      useUiStore.getState().showToast("error", r.error);
+      return;
+    }
+    set({ waterfall: r.data });
+  },
+
+  runAttribution: async () => {
+    const id = get().loadedCellId;
+    if (id == null || get().attributionRunning) return;
+    set({ attributionRunning: true });
+    try {
+      const r = await ecAttributionRun(id);
+      if (get().loadedCellId !== id) return;
+      if (!r.ok) {
+        useUiStore.getState().showToast("error", r.error);
+        return;
+      }
+      set({ attribution: { ...r.data, computed: true, stale: false, updatedAt: "" } });
+      useUiStore.getState().showToast("success", t.echem.attributionDone);
+    } finally {
+      set({ attributionRunning: false });
+    }
+  },
+}));
+
+
 
 interface UiState {
   importOpen: boolean;
+  /** 电化学(LAND)导入弹窗。与 XRD 导入分开 —— 流程不同(带解析预览)。 */
+  ecImportOpen: boolean;
   paletteOpen: boolean;
+  trendOpen: boolean;
+  /** 正在编辑信息的实验(样品)。null = 弹窗关闭。 */
+  editingSample: { id: number; name: string } | null;
   settingsOpen: boolean;
   newProjectOpen: boolean;
   trashOpen: boolean;
@@ -505,7 +1136,10 @@ interface UiState {
    * 否则第二条 toast 会在第一条的定时器到点时被提前清掉 */
   _toastTimer: number | null;
   setImportOpen: (v: boolean) => void;
+  setEcImportOpen: (v: boolean) => void;
   setPaletteOpen: (v: boolean) => void;
+  setTrendOpen: (v: boolean) => void;
+  setEditingSample: (v: { id: number; name: string } | null) => void;
   setSettingsOpen: (v: boolean) => void;
   setNewProjectOpen: (v: boolean) => void;
   setTrashOpen: (v: boolean) => void;
@@ -518,7 +1152,10 @@ interface UiState {
 
 export const useUiStore = create<UiState>((set, get) => ({
   importOpen: false,
+  ecImportOpen: false,
   paletteOpen: false,
+  trendOpen: false,
+  editingSample: null,
   settingsOpen: false,
   newProjectOpen: false,
   trashOpen: false,
@@ -528,7 +1165,10 @@ export const useUiStore = create<UiState>((set, get) => ({
   lastSampleId: null,
   _toastTimer: null,
   setImportOpen: (importOpen) => set({ importOpen }),
+  setEcImportOpen: (ecImportOpen) => set({ ecImportOpen }),
   setPaletteOpen: (paletteOpen) => set({ paletteOpen }),
+  setTrendOpen: (trendOpen) => set({ trendOpen }),
+  setEditingSample: (editingSample) => set({ editingSample }),
   setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
   setNewProjectOpen: (newProjectOpen) => set({ newProjectOpen }),
   setTrashOpen: (trashOpen) => set({ trashOpen }),

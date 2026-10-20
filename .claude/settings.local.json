@@ -1,7 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(cd *)"
+      "Bash(cd *)",
+      "Bash(py --version)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_high_ni.py -q)"
     ]
   }
 }

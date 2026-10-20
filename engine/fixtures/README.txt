@@ -3,6 +3,7 @@
 请勿手工编辑 —— 修改应通过脚本并同步更新 blessed 输出。
 
 文件清单:
+  cobalt_free_01.xy
   descending.xy
   european.txt
   flat_line.xy

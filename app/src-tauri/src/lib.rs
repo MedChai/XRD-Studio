@@ -16,7 +16,10 @@ use std::thread;
 use serde_json::Value;
 
 /// 一个请求的响应通道:{"id": n, ...engine 响应}
-type ResponseMap = HashMap<u64, Sender<Value>>;
+/// 一个响应 = JSON 头 + 可选二进制体(曲线信封,§9.1)。
+/// 二进制体不进 JSON —— 那正是这个改动的目的。
+type Frame = (Value, Vec<u8>);
+type ResponseMap = HashMap<u64, Sender<Frame>>;
 
 struct Engine {
     child: Mutex<Option<Child>>,
@@ -121,7 +124,27 @@ fn write_frame(w: &mut dyn Write, obj: &Value) -> std::io::Result<()> {
     w.flush()
 }
 
-fn read_frame(r: &mut dyn Read) -> std::io::Result<Value> {
+/// 递归查找响应里的 `__bin__.bytes`。
+///
+/// 不能只查 `data.__bin__` —— 信封可能嵌在更深一层(见 read_frame 的说明)。
+fn find_bin_len(node: &Value) -> Option<usize> {
+    match node {
+        Value::Object(map) => {
+            if let Some(meta) = map.get("__bin__") {
+                if let Some(n) = meta.get("bytes").and_then(Value::as_u64) {
+                    if n > 0 {
+                        return Some(n as usize);
+                    }
+                }
+            }
+            map.values().find_map(find_bin_len)
+        }
+        Value::Array(items) => items.iter().find_map(find_bin_len),
+        _ => None,
+    }
+}
+
+fn read_frame(r: &mut dyn Read) -> std::io::Result<(Value, Vec<u8>)> {
     let mut header = [0u8; 4];
     r.read_exact(&mut header)?;
     let len = u32::from_be_bytes(header) as usize;
@@ -133,7 +156,29 @@ fn read_frame(r: &mut dyn Read) -> std::io::Result<Value> {
     }
     let mut buf = vec![0u8; len];
     r.read_exact(&mut buf)?;
-    Ok(serde_json::from_slice(&buf)?)
+    let value: Value = serde_json::from_slice(&buf)?;
+
+    // 曲线信封(§9.1):JSON 头之后可以跟一段二进制体,长度写在
+    // __bin__.bytes 里。**长度前缀只覆盖 JSON 头** —— 所以旧读取方
+    // (只读头)依然能正确解析所有无二进制的帧,这是刻意的向后兼容。
+    //
+    // **必须递归找 __bin__。** `datasets.curve` 把它放在 data 顶层,而
+    // `analysis.preview` 放在 data.curve 里。只查顶层的话,preview 的
+    // 二进制体会被当成"没有二进制"留在管道里,污染**后续每一帧** ——
+    // 表现是切到某个数据集后整个软件开始乱套,而错误信息完全没有指向性。
+    let bin_len = find_bin_len(&value).unwrap_or(0);
+    let mut body = Vec::new();
+    if bin_len > 0 {
+        if bin_len > 256 * 1024 * 1024 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "二进制体过大",
+            ));
+        }
+        body = vec![0u8; bin_len];
+        r.read_exact(&mut body)?;
+    }
+    Ok((value, body))
 }
 
 // ------------------------------------------------------------------
@@ -197,28 +242,31 @@ fn ensure_running(data_root: &std::path::Path) -> Result<(), String> {
         let _ = rx.recv();
         loop {
             match read_frame(&mut stdout) {
-                Ok(resp) => {
+                Ok((resp, body)) => {
                     let id = resp.get("id").and_then(Value::as_u64).unwrap_or(0);
                     let sender = {
                         let mut pending = eng_pending();
                         pending.remove(&id)
                     };
                     if let Some(s) = sender {
-                        let _ = s.send(resp);
+                        let _ = s.send((resp, body));
                     }
                 }
                 Err(_) => {
                     // 引擎退出:失败所有 pending,释放 stdin 使下次 ensure_running 重启
-                    let leftover: Vec<Sender<Value>> = {
+                    let leftover: Vec<Sender<Frame>> = {
                         let mut p = eng_pending();
                         p.drain().map(|(_, s)| s).collect()
                     };
                     for s in leftover {
-                        let _ = s.send(serde_json::json!({
-                            "ok": false,
-                            "error": "分析引擎意外退出,请重试上次操作",
-                            "detail": "sidecar EOF",
-                        }));
+                        let _ = s.send((
+                            serde_json::json!({
+                                "ok": false,
+                                "error": "分析引擎意外退出,请重试上次操作",
+                                "detail": "sidecar EOF",
+                            }),
+                            Vec::new(),
+                        ));
                     }
                     let mut si = engine().stdin.lock().unwrap();
                     *si = None;
@@ -248,8 +296,25 @@ fn eng_pending() -> std::sync::MutexGuard<'static, ResponseMap> {
 // Tauri command
 // ------------------------------------------------------------------
 
+/// 响应打包约定(前端 engine.ts 按同一约定拆):
+///
+///     [u32 BE jsonLen][json header][binary body]
+///
+/// 与引擎→Rust 的帧格式一致,前端只需实现一次拆包。用 ipc::Response
+/// 而不是 Value 是为了让二进制体走 Tauri 的原始字节通道 —— 若返回
+/// Value,serde 会把它转成 JSON 数组(每个字节一个数字),比原来的
+/// number[] 还慢。
+fn pack_response(value: &Value, body: &[u8]) -> tauri::ipc::Response {
+    let json = serde_json::to_vec(value).unwrap_or_else(|_| b"{}".to_vec());
+    let mut out = Vec::with_capacity(4 + json.len() + body.len());
+    out.extend_from_slice(&(json.len() as u32).to_be_bytes());
+    out.extend_from_slice(&json);
+    out.extend_from_slice(body);
+    tauri::ipc::Response::new(out)
+}
+
 #[tauri::command]
-async fn engine_command(cmd: String, payload: String) -> Result<Value, String> {
+async fn engine_command(cmd: String, payload: String) -> Result<tauri::ipc::Response, String> {
     let data_root = {
         // %LOCALAPPDATA%\XRDStudio(§11.4:避免 Program Files 权限与非 ASCII 用户目录问题)
         let base = std::env::var("LOCALAPPDATA")
@@ -281,13 +346,13 @@ async fn engine_command(cmd: String, payload: String) -> Result<Value, String> {
     }
 
     let timeout = std::time::Duration::from_secs(120);
-    let resp = rx
+    let (resp, body) = rx
         .recv_timeout(timeout)
         .map_err(|_| "分析引擎无响应(超时)".to_string())?;
 
     // 摘除本次注册(reader 线程已取出,这里只防御竞态残留)
     eng_pending().remove(&id);
-    Ok(resp)
+    Ok(pack_response(&resp, &body))
 }
 
 #[cfg(windows)]

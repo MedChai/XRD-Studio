@@ -49,6 +49,19 @@ SENSITIVITY_MIN_WIDTH_POINTS: dict[PeakSensitivity, int | None] = {
     "high": None,
 }
 
+# Sensitivity → 局部噪声门限的 σ 倍数。与上面的全局系数一起决定最终
+# prominence 门限(取两者较小者,见 build_detection_kwargs)。
+# 数值按"3σ/5σ/8σ 检出"的常规判据取,并保证 high 档严格宽于 medium。
+SENSITIVITY_LOCAL_SIGMA: dict[PeakSensitivity, float] = {
+    "low": 8.0,
+    "medium": 5.0,
+    "high": 3.0,
+}
+
+# 局部门限相对全局门限的最小比例(下界)。见 build_detection_kwargs 的
+# 说明:纯合成谱上 MAD 噪声尺度会小到让门限低于噪声本身。
+LOCAL_FLOOR_MIN_RATIO = 0.1
+
 # 峰值搜索的默认 half-prominence 高度,用于 FWHM 计算
 FWHM_REL_HEIGHT = 0.5
 
@@ -79,12 +92,60 @@ def _resolve_intensity_range(y: np.ndarray) -> float:
     结果是整条基线噪声被当成几百个峰检出。max 对"最强反射"的定义
     与用户说「相对最强峰 5%」时的直觉一致;中位数对基线漂移与噪声
     都稳健。
+
+    **注意这个量是全谱的。** 用它直接做 prominence 门限会在高角系统性
+    漏峰:层状正极的 (003) 与 (113) 强度可差两个数量级,而背景在高角
+    还更高。见 `_local_prominence_floor` —— 实际门限取全局与局部两者
+    的较小者,既保留低角抗噪能力,又不至于把高角弱峰全部砍掉。
     """
     finite = y[np.isfinite(y)]
     if finite.size == 0:
         return 0.0
     span = float(finite.max() - np.median(finite))
     return span if span > 0 else float(finite.max() - finite.min())
+
+
+def _local_prominence_floor(y: np.ndarray, k: float) -> float:
+    """由**局部**噪声水平推出的 prominence 门限。
+
+    做法:把谱按滑动中位窗估计基线,取残差的中位绝对偏差(MAD)作为噪声
+    尺度 σ,门限取 k·σ。
+
+    为什么必须补这一条:全局门限 = factor × (max − median)。实测一张
+    SmartLab 谱 max−median = 87567,medium 档门限 4378 —— 而该谱高角
+    弱峰 (113)=4592、(116)=2808、(027)=2058、(208)=1775,直接落选。
+    这些峰在物理上是真实反射(全局拟合能解出 1000+ 的振幅),漏掉它们
+    不是"保守",是错误。局部门限对同样的谱给出约 300–600,弱峰得以保留,
+    而基线噪声的 MAD 也随之放大,不会把噪声当峰。
+
+    用 MAD 而不是标准差:标准差会被峰本身抬高,在高角弱峰区尤其明显。
+    """
+    y_arr = np.asarray(y, dtype=np.float64).ravel()
+    n = y_arr.size
+    if n < 16:
+        return 0.0
+    # 滑动中位窗的窗宽取全谱的 2%(至少 15 点),足以跨过单条峰而跟随基线
+    win = max(15, (n // 50) | 1)
+    if win >= n:
+        return 0.0
+    # 用 stride trick 做滑动中位,避免 Python 循环
+    try:
+        from numpy.lib.stride_tricks import sliding_window_view
+
+        windows = sliding_window_view(y_arr, win)
+        baseline = np.median(windows, axis=1)
+    except (ValueError, MemoryError):
+        return 0.0
+    # 基线只在窗口中心处有效,两端各截掉半个窗宽
+    half = win // 2
+    core = y_arr[half : half + baseline.size]
+    if core.size == 0:
+        return 0.0
+    residual = core - baseline
+    mad = float(np.median(np.abs(residual - np.median(residual))))
+    # 1.4826 把 MAD 折算成等效高斯 σ
+    sigma = 1.4826 * mad
+    return max(k * sigma, 0.0)
 
 
 def build_detection_kwargs(
@@ -101,12 +162,45 @@ def build_detection_kwargs(
     if params.sensitivity not in SENSITIVITY_PROMINENCE_FACTOR:
         raise PeakDetectionError(f"未知的灵敏度档位:{params.sensitivity}")
 
-    prominence = intensity_range * SENSITIVITY_PROMINENCE_FACTOR[params.sensitivity]
+    # prominence 门限取**全局与局部两者的较小者**,但局部门限不得低于
+    # 全局门限的一个下界。
+    #
+    # 全局门限保证低角强峰区不会被噪声淹没;局部门限保证高角弱峰不会被
+    # 一个只反映 (003) 强度的数字砍掉。
+    #
+    # 为什么要给局部门限设下界:局部噪声用 MAD 估计,在极干净的合成谱上
+    # σ 只有 2 counts,5σ = 10,而该谱的噪声峰突出度实测可达 15 —— 门限
+    # 比噪声本身还低,基线抖动被当成峰检出(实测一条单峰合成谱检出 3 个
+    # 峰)。取 max(局部, 全局×下限系数) 既保留高角灵敏度,又不会把
+    # 门限压到噪声之下。下限系数 0.1 的含义:最宽也只比全局门限宽 10 倍。
+    factor = SENSITIVITY_PROMINENCE_FACTOR[params.sensitivity]
+    global_floor = intensity_range * factor
+    prominence = global_floor
+    local_floor = _local_prominence_floor(y, SENSITIVITY_LOCAL_SIGMA[params.sensitivity])
+    if local_floor > 0:
+        prominence = min(global_floor, max(local_floor, global_floor * LOCAL_FLOOR_MIN_RATIO))
     # Advanced 区若给了显式 prominence,以用户值为准
     if params.prominence is not None:
         prominence = float(params.prominence)
 
-    height = intensity_range * (params.min_height_pct / 100.0)
+    # height 门限:只用来挡噪声,不能把高角弱峰挡掉。
+    #
+    # 为什么不能沿用"全局 range × min_height_pct":height 约束的是峰的
+    # **绝对 ordinate**,而高角处的 ordinate 本来就贴近基线。实测一张
+    # SmartLab 谱 range=87567,5% 得 4378,而高角弱峰 (208) 的峰顶只有
+    # 6650 —— 看着能过,但基线已抬到 5400,**相对基线的幅度**只剩 1250。
+    # 用户调"最小峰高"时想表达的正是这个相对幅度,不是绝对读数。
+    # 所以门限 = 基线水平 + 幅度下限(见 _baseline_quantile)。
+    #
+    # 另一个关键点:height 必须**随灵敏度一起放宽**。旧实现里 height 与
+    # 灵敏度无关,于是 high 档把 prominence 降到 1/3 的同时 height 原地
+    # 不动并成为唯一约束 —— 实测 medium 与 high 的检出集合完全相同,
+    # 灵敏度滑块在最需要它的档位上失效。
+    amplitude_floor = intensity_range * (params.min_height_pct / 100.0)
+    if local_floor > 0:
+        # 局部门限已经把弱峰放行时,height 不应再紧于它,否则前一条白做
+        amplitude_floor = min(amplitude_floor, local_floor)
+    height = amplitude_floor + _baseline_quantile(y)
 
     if params.min_distance_deg <= 0:
         raise PeakDetectionError(
@@ -136,6 +230,25 @@ def build_detection_kwargs(
         raw_count=0,
     )
     return kwargs, diag
+
+
+def _baseline_quantile(y: np.ndarray) -> float:
+    """谱的基线水平:强度的低分位数。
+
+    用作 height 门限的基准 —— height 约束的是峰的绝对 ordinate,而不同
+    样品的基线高低差别很大(本底、荧光、非晶包)。以基线为基准,用户
+    设 5% 时得到的是"比基线高出 5% 量程",这才是"最小峰高"的直觉。
+
+    用 10% 分位数而不是滑动中位窗:层状正极的 (003) 是最强峰,一个
+    95 点(约 1.9°)的滑动中位窗在很多位置上**整窗都落在峰内**,会把
+    基线估到 11000(真基线约 5400),反而比旧实现更严。低分位数天然
+    落在基线一侧,不受强峰影响。
+    """
+    y_arr = np.asarray(y, dtype=np.float64).ravel()
+    finite = y_arr[np.isfinite(y_arr)]
+    if finite.size == 0:
+        return 0.0
+    return float(np.percentile(finite, 10.0))
 
 
 def detect_peaks(

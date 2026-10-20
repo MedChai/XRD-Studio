@@ -1,6 +1,11 @@
-/** 状态栏(§15):光标读数、点数、保存状态。 */
+/** 状态栏(§15):光标读数、点数、保存状态。
+ *
+ *  电化学模式(cellId 非空)整栏换成模式标签:2θ 光标、XRD 点数/
+ *  峰固化徽标、谱图管线状态全是谱图语境,selectCell 不清 analysisStore,
+ *  留着会显示上一张谱图的残值,只会误导。
+ */
 
-import { useAnalysisStore, usePlotStore } from "../stores";
+import { useAnalysisStore, usePlotStore, useSelectionStore } from "../stores";
 import { t } from "../i18n";
 
 export function StatusBar() {
@@ -9,6 +14,19 @@ export function StatusBar() {
   const peaksDirty = useAnalysisStore((s) => s.peaksDirty);
   const crosshair = usePlotStore((s) => s.crosshair);
   const cursor = usePlotStore((s) => s.cursor);
+  const cellId = useSelectionStore((s) => s.cellId);
+
+  if (cellId != null) {
+    return (
+      <footer
+        className="blur-surface flex shrink-0 items-center gap-4 border-t border-[var(--divider)] bg-[var(--bg-sidebar)] px-3 text-[11px] text-[var(--text-secondary)]"
+        style={{ height: "var(--statusbar-h)" }}
+      >
+        <span>{t.status.ecMode}</span>
+        <span className="flex-1" />
+      </footer>
+    );
+  }
 
   return (
     <footer
@@ -25,7 +43,14 @@ export function StatusBar() {
       )}
       <span className="flex-1" />
       {curve && (
-        <span className="tabular">{t.status.points(curve.pointCount.toLocaleString())}</span>
+        <span className="tabular">
+          {curve.downsampled
+            ? t.status.pointsDisplay(
+                curve.pointCount.toLocaleString(),
+                (curve.sourcePointCount ?? curve.pointCount).toLocaleString(),
+              )
+            : t.status.points(curve.pointCount.toLocaleString())}
+        </span>
       )}
       {/* 参数改过但还没固化时给出提示 —— 否则用户点完「检测峰」看不出有没有生效 */}
       {curve && peaksDirty && status === "idle" && (

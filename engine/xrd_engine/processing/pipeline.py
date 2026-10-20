@@ -18,11 +18,26 @@
 
 每次求值都从原始曲线开始重算,不做跨请求的状态累积。这是「非破坏性」
 原则在引擎层的体现:参数变了就整链重跑,不存在「处理到一半」的中间态。
+
+## 阶段缓存(§9.3)
+
+"整链重跑"说的是**语义**,不是"每一步都真的重算"。背景估计(AsLS)
+实测约 23 ms,SG 平滑约 0.4 ms —— 差 60 倍。用户拖平滑窗口时背景
+一点没变,却要陪着重算一遍。
+
+`_stage_cache` 按**参数前缀**缓存各阶段输出:背景只依赖
+(crop, background),平滑依赖 (crop, background, smoothing)。
+前缀不变即命中。这样"只改 Smooth 不重算 Background"就是自然的,
+不需要为每种组合写特例。
+
+**键必须是整段前缀,不能只放单个字段** —— 用户同时改了 crop 和
+background 时,只比 background 会命中一个用旧 crop 算出来的背景。
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+from dataclasses import asdict, dataclass
 
 import numpy as np
 
@@ -88,6 +103,43 @@ def apply_crop(curve: Curve, x_min: float | None, x_max: float | None) -> Curve:
     )
 
 
+# 阶段缓存:key = (曲线指纹, 阶段名, 参数前缀) -> 该阶段输出。
+#
+# 有界:缓存里放的是整条曲线量级的数组(4751 点 × 8 字节 ≈ 38 KB),
+# 32 条足够覆盖"来回切几个数据集 + 拖参数"的实际用法。
+_STAGE_CACHE: dict[tuple, object] = {}
+_STAGE_CACHE_LIMIT = 32
+
+
+def clear_stage_cache() -> None:
+    """清空阶段缓存。数据集被删/替换后必须调用 —— 指纹能挡住大部分
+    情况,但显式清更稳妥(与 annotate.invalidate_fit_cache 同一理由)。"""
+    _STAGE_CACHE.clear()
+
+
+def _fingerprint(curve: Curve) -> tuple:
+    """曲线指纹。**不能只用 id**:曲线对象没有 id,而且数据集删除后
+    id 可能复用,只按 id 会拿到上一条曲线的中间结果。"""
+    y = curve.y
+    return (
+        int(y.size),
+        round(float(curve.x[0]), 6) if y.size else 0.0,
+        round(float(curve.x[-1]), 6) if y.size else 0.0,
+        round(float(y.sum()), 3),
+        curve.x_axis_type,
+    )
+
+
+def _cache_get(key: tuple):
+    return _STAGE_CACHE.get(key)
+
+
+def _cache_put(key: tuple, value: object) -> None:
+    if len(_STAGE_CACHE) >= _STAGE_CACHE_LIMIT:
+        _STAGE_CACHE.pop(next(iter(_STAGE_CACHE)))
+    _STAGE_CACHE[key] = value
+
+
 def run_pipeline(
     curve: Curve,
     params: PipelineParams,
@@ -99,6 +151,7 @@ def run_pipeline(
     拖动参数滑块时只需要看曲线形状,跳过这步能明显降低延迟(§9.2)。
     """
     warnings: list[str] = []
+    fp = _fingerprint(curve)
 
     # --- 1. Crop ---
     working = curve
@@ -116,14 +169,29 @@ def run_pipeline(
     y = working.y
 
     # --- 2. Background 估计 ---
+    #
+    # 缓存键 = (曲线指纹, 阶段, 参数前缀)。背景只依赖 crop 与 background
+    # 两组参数,所以拖平滑窗口时这一步会命中 —— AsLS 实测约 23 ms,
+    # 而 SG 平滑只有 0.4 ms,不缓存就是让用户为没变的计算等 60 倍时间。
     background: np.ndarray | None = None
     if params.background.enabled:
-        try:
-            background = estimate_background(x, y, params.background)
-        except BackgroundError as exc:
-            raise PipelineError(
-                reason=str(exc), stage="background", detail=type(exc).__name__
-            ) from exc
+        bg_key = (
+            fp,
+            "background",
+            json.dumps(asdict(params.crop), sort_keys=True),
+            json.dumps(asdict(params.background), sort_keys=True),
+        )
+        cached_bg = _cache_get(bg_key)
+        if cached_bg is not None:
+            background = cached_bg  # type: ignore[assignment]
+        else:
+            try:
+                background = estimate_background(x, y, params.background)
+            except BackgroundError as exc:
+                raise PipelineError(
+                    reason=str(exc), stage="background", detail=type(exc).__name__
+                ) from exc
+            _cache_put(bg_key, background)
 
         # 背景高于信号是常见的异常信号,提示用户调整参数
         if background.max() > y.max():
@@ -138,12 +206,24 @@ def run_pipeline(
     metrics_affected_by_smoothing = False
     y_metric = y
     if params.smoothing.enabled:
-        try:
-            y_smooth = savgol_smooth(y, params.smoothing)
-        except SmoothingError as exc:
-            raise PipelineError(
-                reason=str(exc), stage="smoothing", detail=type(exc).__name__
-            ) from exc
+        sm_key = (
+            fp,
+            "smoothing",
+            json.dumps(asdict(params.crop), sort_keys=True),
+            json.dumps(asdict(params.background), sort_keys=True),
+            json.dumps(asdict(params.smoothing), sort_keys=True),
+        )
+        cached_sm = _cache_get(sm_key)
+        if cached_sm is not None:
+            y_smooth = cached_sm  # type: ignore[assignment]
+        else:
+            try:
+                y_smooth = savgol_smooth(y, params.smoothing)
+            except SmoothingError as exc:
+                raise PipelineError(
+                    reason=str(exc), stage="smoothing", detail=type(exc).__name__
+                ) from exc
+            _cache_put(sm_key, y_smooth)
 
         y = y_smooth
         y_metric = y_smooth
@@ -177,16 +257,17 @@ def run_pipeline(
                 reason=f"寻峰失败:{exc}", stage="peaks", detail=type(exc).__name__
             ) from exc
 
-        if peaks:
+        if peaks and compute_peak_metrics:
             # FWHM 与边界基于峰形本身,在 y_metric 上算
             compute_fwhm_and_bounds(x, y_metric, peaks, rel_height=params.peaks.rel_height)
             # 相邻峰边界重叠时截断,避免 Area 重复计算
             clamp_bounds_to_neighbors(peaks)
-
-            if compute_peak_metrics:
-                # §38:默认峰边界取局部极小值(全峰面积);
-                # FWHM 边界只用于报告半高宽,不用于 Area 积分区间
-                compute_areas(x, y_metric, peaks, use_fwhm_bounds=False)
+            # §38:默认峰边界取局部极小值(全峰面积);
+            # FWHM 边界只用于报告半高宽,不用于 Area 积分区间
+            compute_areas(x, y_metric, peaks, use_fwhm_bounds=False)
+        # compute_peak_metrics=False(拖动预览):detect_peaks 返回的 Peak
+        # 本身 fwhm/area/left_bound/right_bound 就是 None,直接跳过即可 ——
+        # 寻峰仍给位置/强度让峰标记跟手,度量由收尾 preview 再补。
 
     if x.size < 3:
         warnings.append("数据点太少,未进行寻峰")

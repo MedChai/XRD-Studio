@@ -4,8 +4,13 @@
 
     请求:  [4 字节大端长度][UTF-8 JSON]
             {"id": 1, "cmd": "datasets.import", "payload": {...}}
-    响应:  [4 字节大端长度][UTF-8 JSON]
-            {"id": 1, "ok": true, "data": ...}
+    响应:  [4 字节大端长度][UTF-8 JSON][可选二进制体]
+            {"id": 1, "ok": true, "data": {...}}
+            二进制体由 data.__bin__ 描述(§9.1 曲线信封),没有大数组时为空。
+
+    **长度前缀只覆盖 JSON 头**,二进制体的长度写在 `data.__bin__.bytes`
+    里。读取方先读头、再按需多读那一段 —— 这样旧读取方(只读头)依然
+    能正确解析所有无二进制的帧。
 
 Rust 侧(Tauri sidecar 监管)负责进程启动、请求路由与崩溃重启;
 本文件只做「读帧 → 分发 → 写帧」,stderr 留给日志。
@@ -30,23 +35,91 @@ from .api.commands import Engine
 _HEADER = struct.Struct(">I")
 
 
-def read_frame(stream) -> dict | None:
-    raw = stream.read(_HEADER.size)
-    if not raw or len(raw) < _HEADER.size:
-        return None  # EOF
-    (length,) = _HEADER.unpack(raw)
-    data = b""
-    while len(data) < length:
-        chunk = stream.read(length - len(data))
+def _read_exact(stream, n: int) -> bytes | None:
+    """读满 n 字节,读不满(EOF)返回 None。
+
+    **不能只调一次 stream.read(n)**:管道不保证一次给满,短读会让长度
+    前缀与帧体错位,而错位后读到的长度通常是个天文数字 —— 进程会一直
+    等永远不来的数据,表现为界面永远转圈且没有任何错误信息。
+    帧体的读取原本就循环了,头部却没有,这里统一。
+    """
+    buf = bytearray()
+    while len(buf) < n:
+        chunk = stream.read(n - len(buf))
         if not chunk:
             return None
-        data += chunk
+        buf += chunk
+    return bytes(buf)
+
+
+def read_frame(stream) -> dict | None:
+    raw = _read_exact(stream, _HEADER.size)
+    if raw is None:
+        return None  # EOF
+    (length,) = _HEADER.unpack(raw)
+    data = _read_exact(stream, length)
+    if data is None:
+        return None
     return json.loads(data.decode("utf-8"))
 
 
+
+def _strip_binary(obj):
+    """递归摘掉 `_binary`,并返回 (可序列化的对象, 二进制体)。
+
+    **必须递归。** 二进制体不总在 `data` 顶层:`analysis.preview` 的曲线
+    嵌在 `data.curve` 里,`datasets.curve` 才在 `data` 顶层。早先只检查
+    顶层,结果 preview 一调用就让引擎在 `json.dumps` 上抛
+    `TypeError: Object of type bytes is not JSON serializable` —— 而且是
+    在主循环里抛,整个进程直接退出,前端看到的是"分析引擎意外退出"。
+
+    进程内测试发现不了这个:它们直接调 `Engine.handle`,不经过
+    `write_frame`。所以另有一组测试真的起子进程走完整协议
+    (tests/test_protocol_e2e.py)。
+
+    浅拷贝而非就地改:命令返回值会被复用(测试、dev_server 都直接读它)。
+    """
+    binary = b""
+    if isinstance(obj, dict):
+        out = {}
+        for key, value in obj.items():
+            if key == "_binary":
+                if isinstance(value, (bytes, bytearray)):
+                    binary = bytes(value)
+                continue
+            if isinstance(value, (dict, list)):
+                cleaned, found = _strip_binary(value)
+                if found:
+                    binary = found
+                out[key] = cleaned
+            else:
+                out[key] = value
+        return out, binary
+    if isinstance(obj, list):
+        out_list = []
+        for item in obj:
+            cleaned, found = _strip_binary(item)
+            if found:
+                binary = found
+            out_list.append(cleaned)
+        return out_list, binary
+    return obj, binary
+
 def write_frame(stream, obj: dict) -> None:
-    data = json.dumps(obj, ensure_ascii=False).encode("utf-8")
-    stream.write(_HEADER.pack(len(data)) + data)
+    """写一帧:[u32 BE jsonLen][json][可选二进制体]。
+
+    **二进制体是可选的,且为空时与旧格式逐字节相同。** 这一点是刻意的:
+    绝大多数命令(建项目、改参数、查库)没有大数组,它们的帧不该因为
+    这个改动而变长一个字节 —— 传输层一旦错位,表现是"整个软件打不开
+    任何数据"而不是"性能没变好"。
+
+    二进制体藏在 data 的 `_binary` 键里(由 curve_payload 放进去),
+    序列化前必须摘掉 —— 否则 json.dumps 会因为 bytes 不可序列化而报错。
+    """
+    data_obj, binary = _strip_binary(obj)
+
+    data = json.dumps(data_obj, ensure_ascii=False).encode("utf-8")
+    stream.write(_HEADER.pack(len(data)) + data + binary)
     stream.flush()
 
 

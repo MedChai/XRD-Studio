@@ -5,6 +5,9 @@ target/
 __pycache__/
 *.pyc
 .venv/
+.pytest-tmp-xrd/
+engine/build/
+app/src-tauri/sidecar/
 
 # 运行时数据(绝不入库)
 XRDStudio/

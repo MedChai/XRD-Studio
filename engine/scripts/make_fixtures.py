@@ -15,6 +15,7 @@ README §12.0 要求 fixtures 中的合成谱必须可复现,因此不手工放�
 
 from __future__ import annotations
 
+import math
 import sys
 from pathlib import Path
 
@@ -95,26 +96,94 @@ def make_lfp_pattern(
     return x, np.maximum(y, 0.0)
 
 
+def _r3m_two_theta(h: int, k: int, l: int, a: float, c: float, lam: float) -> float:
+    """R-3m 六方晶胞的 (hkl) → 2θ。位置由晶体学反算,不写死数字。"""
+    inv_d2 = (4.0 / 3.0) * (h * h + h * k + k * k) / (a * a) + (l * l) / (c * c)
+    d = 1.0 / math.sqrt(inv_d2)
+    return math.degrees(2.0 * math.asin(lam / (2.0 * d)))
+
+
 def make_ncm811_pattern(seed: int = RANDOM_SEED + 1) -> tuple[np.ndarray, np.ndarray]:
-    """生成一张 NCM811(层状氧化物)衍射谱。峰更少、更宽。"""
+    """生成一张 NCM811(层状氧化物)衍射谱。
+
+    **峰位由 R-3m 晶胞反算,不再手写。** 手写的版本里 (006) 标在 38.18°
+    而 (110) 标在 68.00° —— 后者按任何合理晶胞都对应 (113),(110) 应在
+    64.6° 附近;而 38.18° 处按 a=2.874/c=14.24 实际是 102 分量而非 (006)。
+    这种"注释与实际位置不符"的 fixture 会把错误的期望固化进测试。
+
+    只列**允许**反射(-h+k+l ≡ 0 mod 3);(006) 弱、102 分量强(显示名
+    跟文献走),与层状正极实验一致。
+    """
     x = np.arange(10.0, 80.0 + 0.02 / 2, 0.02)
     rng = np.random.default_rng(seed)
 
-    peaks = [
-        (18.71, 1.00, 0.22),  # (003)
-        (36.62, 0.35, 0.24),  # (101)
-        (38.18, 0.16, 0.25),  # (006)
-        (44.52, 0.42, 0.26),  # (104)
-        (48.60, 0.13, 0.27),  # (015)
-        (58.60, 0.14, 0.29),  # (107)
-        (64.20, 0.20, 0.30),  # (018)
-        (68.00, 0.14, 0.31),  # (110)
+    a, c, lam = 2.874, 14.240, 1.5418
+    # (hkl): 相对强度。强度比参考层状正极典型谱:(003) 最强,高角依次衰减。
+    reflections = [
+        ((0, 0, 3), 1.00),
+        ((1, 0, 1), 0.35),
+        ((0, 0, 6), 0.03),   # 弱
+        ((0, 1, 2), 0.11),   # 强于 (006)
+        ((1, 0, 4), 0.42),
+        ((0, 1, 5), 0.13),
+        ((1, 0, 7), 0.12),
+        ((0, 1, 8), 0.16),
+        ((1, 1, 0), 0.20),
+        ((1, 1, 3), 0.13),
+        ((1, 1, 6), 0.05),
+        ((2, 0, 2), 0.04),
     ]
+    fwhm_at_0, fwhm_slope = 0.16, 0.0028
 
     y = np.full_like(x, 95.0)
-    for center, rel_amp, fwhm in peaks:
+    for (h, k, l), rel_amp in reflections:
+        center = _r3m_two_theta(h, k, l, a, c, lam)
+        fwhm = fwhm_at_0 + fwhm_slope * center
         y += pseudo_voigt(x, center, rel_amp * 26000.0 * 0.30, fwhm)
-    y += 420.0 * np.exp(-(x - 10.0) / 15.0)
+    y += 420.0 * np.exp(-(x - 10.0) / 15.0)  # 低角非晶包
+    y = rng.poisson(np.maximum(y, 1.0)).astype(np.float64)
+    return x, np.maximum(y, 0.0)
+
+
+def make_cobalt_free_pattern(seed: int = RANDOM_SEED + 2) -> tuple[np.ndarray, np.ndarray]:
+    """生成一张**无钴**高镍层状谱(NMA 型:LiNi0.90Mn0.05Al0.05O2)。
+
+    与 ncm811_01(含钴, a=2.874/c=14.240)刻意不同:
+      - 晶胞取无钴端元常见值 a=2.884 / c=14.278 —— 正是用户实测精修值
+        附近的胞,写死 2.878/14.216 的旧逻辑在这张谱上会偏约 0.1°,
+        (006)/(102) 配名可被检验出来;
+      - (006) 极弱、102 分量明显强(层状正极分工), (108)/(110) 双峰保留;
+      - 谱尾加一个 R-3m 允许反射表之外的小峰(39.5°,模拟残碱/杂相),
+        用于检验"未建模峰报 none 而不误标"。
+    """
+    x = np.arange(10.0, 80.0 + 0.02 / 2, 0.02)
+    rng = np.random.default_rng(seed)
+
+    a, c, lam = 2.884, 14.278, 1.540593  # Cu Kα1,与用户 Rigaku 数据一致
+    reflections = [
+        ((0, 0, 3), 1.00),
+        ((1, 0, 1), 0.33),
+        ((0, 0, 6), 0.05),   # 弱,但要在 medium 灵敏度下可检出
+        ((0, 1, 2), 0.12),   # 强于 (006)
+        ((1, 0, 4), 0.40),
+        ((0, 1, 5), 0.12),
+        ((1, 0, 7), 0.11),
+        ((0, 1, 8), 0.15),
+        ((1, 1, 0), 0.19),
+        ((1, 1, 3), 0.12),
+        ((1, 1, 6), 0.05),
+        ((2, 0, 2), 0.04),
+    ]
+    fwhm_at_0, fwhm_slope = 0.17, 0.0030
+
+    y = np.full_like(x, 90.0)
+    for (h, k, l), rel_amp in reflections:
+        center = _r3m_two_theta(h, k, l, a, c, lam)
+        fwhm = fwhm_at_0 + fwhm_slope * center
+        y += pseudo_voigt(x, center, rel_amp * 24000.0 * 0.30, fwhm)
+    # 杂相峰(不在 R-3m 允许表内):归属应报 none,而不是硬套最近的晶面
+    y += pseudo_voigt(x, 39.50, 24000.0 * 0.30 * 0.06, 0.22)
+    y += 400.0 * np.exp(-(x - 10.0) / 15.0)
     y = rng.poisson(np.maximum(y, 1.0)).astype(np.float64)
     return x, np.maximum(y, 0.0)
 
@@ -149,6 +218,10 @@ def main() -> int:
 
     x_ncm, y_ncm = make_ncm811_pattern()
     write_xy(FIXTURES_DIR / "ncm811_01.xy", x_ncm, y_ncm)
+
+    # 无钴高镍(a/c 偏离写死值,含杂相峰)—— 标注回归的无钴基准
+    x_cf, y_cf = make_cobalt_free_pattern()
+    write_xy(FIXTURES_DIR / "cobalt_free_01.xy", x_cf, y_cf)
 
     # --- 非均匀网格:等 d 扫描,转成 2θ 后步长天然不均匀(§4.2) ---
     d_min, d_max = 0.909, 8.83  # 对应 Cu Kα 下约 10°–80°

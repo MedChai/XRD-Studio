@@ -10,6 +10,7 @@ import {
   Pencil,
   Search,
   Sun,
+  TrendingUp,
   Trash2,
   Upload,
   Wand2,
@@ -23,6 +24,12 @@ import {
 } from "../../stores";
 import { useSelectionStore } from "../../stores";
 import { t } from "../../i18n";
+import {
+  exportData,
+  exportFigure,
+  exportFigureSvg,
+  exportPeaks,
+} from "../../services/exports";
 
 interface Entry {
   id: string;
@@ -37,8 +44,12 @@ export function CommandPalette() {
   const setOpen = useUiStore((s) => s.setPaletteOpen);
   const { samples } = useProjectStore();
   const { setTheme, theme } = useAppStore();
-  const { selectDataset } = useSelectionStore();
+  const selectDataset = useSelectionStore((s) => s.selectDataset);
   const loadDataset = useAnalysisStore((s) => s.loadDataset);
+  const curve = useAnalysisStore((s) => s.curve);
+  const peaks = useAnalysisStore((s) => s.peaks);
+  const figureExporter = usePlotStore((s) => s.figureExporter);
+  const figureSvgExporter = usePlotStore((s) => s.figureSvgExporter);
   const [q, setQ] = useState("");
   const [active, setActive] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -52,12 +63,84 @@ export function CommandPalette() {
   }, [open]);
 
   const entries = useMemo<Entry[]>(() => {
+    const notifyExport = (result: { ok: boolean; cancelled?: boolean; error?: string }) => {
+      if (result.cancelled) return;
+      useUiStore.getState().showToast(
+        result.ok ? "success" : "error",
+        result.ok ? t.command.exportSuccess : (result.error ?? t.command.exportPending),
+      );
+    };
+    const currentDataset = () => {
+      const { datasetId, sampleId } = useSelectionStore.getState();
+      const sample = samples.find((item) => item.id === sampleId);
+      const dataset = sample?.datasets.find((item) => item.id === datasetId);
+      return datasetId == null || dataset == null
+        ? null
+        : { id: datasetId, name: dataset.name };
+    };
     const cmds: Entry[] = [
       { id: "import", label: t.command.importData, icon: <Upload size={14} />, group: t.command.groupCommands, run: () => useUiStore.getState().setImportOpen(true) },
       { id: "newProject", label: t.command.newProject, icon: <FolderPlus size={14} />, group: t.command.groupCommands, run: () => useUiStore.getState().setNewProjectOpen(true) },
-      { id: "detect", label: t.command.detectPeaks, icon: <Wand2 size={14} />, group: t.command.groupCommands, run: () => useAnalysisStore.getState().patchPipeline({}) },
+      { id: "detect", label: t.command.detectPeaks, icon: <Wand2 size={14} />, group: t.command.groupCommands, run: () => { void useAnalysisStore.getState().detectPeaks(); } },
       { id: "fitAll", label: t.command.fitAll, icon: <Maximize2 size={14} />, group: t.command.groupCommands, run: () => usePlotStore.getState().fitAll() },
-      { id: "export", label: t.command.exportPeaks, icon: <Download size={14} />, group: t.command.groupCommands, run: () => useUiStore.getState().showToast("success", t.command.exportPending) },
+      {
+        id: "exportPeaks",
+        label: t.command.exportPeaks,
+        icon: <Download size={14} />,
+        group: t.command.groupCommands,
+        run: () => {
+          const dataset = currentDataset();
+          if (!dataset) {
+            useUiStore.getState().showToast("error", t.command.exportPending);
+            return;
+          }
+          void exportPeaks(dataset.id, dataset.name, peaks).then(notifyExport);
+        },
+      },
+      {
+        id: "exportData",
+        label: t.command.exportData,
+        icon: <Download size={14} />,
+        group: t.command.groupCommands,
+        run: () => {
+          const dataset = currentDataset();
+          if (!dataset || !curve) {
+            useUiStore.getState().showToast("error", t.command.exportPending);
+            return;
+          }
+          void exportData(dataset.id, dataset.name, curve).then(notifyExport);
+        },
+      },
+      {
+        id: "exportFigure",
+        label: t.command.exportFigure,
+        icon: <Download size={14} />,
+        group: t.command.groupCommands,
+        run: () => {
+          const dataset = currentDataset();
+          const dataUrl = figureExporter?.();
+          if (!dataset || !dataUrl) {
+            useUiStore.getState().showToast("error", t.command.exportPending);
+            return;
+          }
+          void exportFigure(dataset.id, dataset.name, dataUrl).then(notifyExport);
+        },
+      },
+      {
+        id: "exportFigureSvg",
+        label: t.command.exportFigureSvg,
+        icon: <Download size={14} />,
+        group: t.command.groupCommands,
+        run: () => {
+          const dataset = currentDataset();
+          const svg = figureSvgExporter?.();
+          if (!dataset || !svg) {
+            useUiStore.getState().showToast("error", t.command.exportPending);
+            return;
+          }
+          void exportFigureSvg(dataset.name, svg).then(notifyExport);
+        },
+      },
       {
         id: "renameDataset",
         label: t.command.renameDataset,
@@ -84,6 +167,13 @@ export function CommandPalette() {
           if (datasetId == null) return;
           void useProjectStore.getState().deleteItem("datasets", datasetId);
         },
+      },
+      {
+        id: "trend",
+        label: t.trend.open,
+        icon: <TrendingUp size={14} />,
+        group: t.command.groupCommands,
+        run: () => useUiStore.getState().setTrendOpen(true),
       },
       {
         id: "openTrash",
@@ -113,7 +203,7 @@ export function CommandPalette() {
       },
     }));
     return [...cmds, ...samples_];
-  }, [samples, theme, setTheme, selectDataset, loadDataset]);
+  }, [samples, theme, setTheme, selectDataset, loadDataset, curve, peaks, figureExporter, figureSvgExporter]);
 
   const filtered = useMemo(() => {
     const needle = q.trim().toLowerCase();

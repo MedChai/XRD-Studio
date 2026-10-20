@@ -3,7 +3,6 @@
 import * as ToggleGroup from "@radix-ui/react-toggle-group";
 import type { ReactNode } from "react";
 import { cn } from "./cn";
-import { RangeSlider } from "./Slider";
 
 export function Button({
   children,
@@ -11,12 +10,14 @@ export function Button({
   kind = "secondary",
   className,
   disabled,
+  title,
 }: {
   children: ReactNode;
   onClick?: () => void;
   kind?: "primary" | "secondary" | "ghost" | "danger";
   className?: string;
   disabled?: boolean;
+  title?: string;
 }) {
   const base =
     "tr inline-flex h-7 items-center gap-1.5 rounded-[var(--radius-button)] px-3 text-[13px] font-medium disabled:opacity-40";
@@ -28,7 +29,7 @@ export function Button({
     danger: "bg-[var(--danger)] text-white hover:opacity-90",
   };
   return (
-    <button className={cn(base, kinds[kind], className)} onClick={onClick} disabled={disabled}>
+    <button className={cn(base, kinds[kind], className)} onClick={onClick} disabled={disabled} title={title}>
       {children}
     </button>
   );
@@ -116,37 +117,6 @@ export function SwitchRow({
         />
       </span>
     </button>
-  );
-}
-
-export function LabeledSlider({
-  value,
-  min,
-  max,
-  step = 1,
-  onChange,
-  display,
-}: {
-  value: number;
-  min: number;
-  max: number;
-  step?: number;
-  onChange: (v: number) => void;
-  display?: string;
-}) {
-  return (
-    <div className="flex items-center gap-2 px-3 py-1">
-      <RangeSlider
-        value={[value]}
-        min={min}
-        max={max}
-        step={step}
-        onValueChange={([v]) => onChange(v)}
-      />
-      <span className="tabular w-12 text-right text-[12px] font-medium text-[var(--text-primary)]">
-        {display ?? value}
-      </span>
-    </div>
   );
 }
 

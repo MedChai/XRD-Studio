@@ -36,11 +36,21 @@ function XRDChartInner({ onPeakClick }: Props) {
   const chartRef = useRef<echarts.ECharts | null>(null);
   /** 上一次回放到图上的 zoom,用于值相等短路(防环第二层) */
   const appliedZoom = useRef<string>("");
+  /** 上一次因选中峰而自动定位的峰序号。见下面 auto-zoom effect 的说明。 */
+  const autoZoomedPeak = useRef<number | null>(null);
   const curve = useAnalysisStore((s) => s.curve);
   const peaks = useAnalysisStore((s) => s.peaks);
   const selectedPeak = useSelectionStore((s) => s.selectedPeakIndex);
   const selectPeak = useSelectionStore((s) => s.setSelectedPeak);
-  const { mode, crosshair, showLabels, offset, showBackground, zoom } = usePlotStore();
+  // 逐字段选择器:全量解构会让 crosshair mousemove 的 cursor 更新
+  // 重渲染整个主图(§15 / B1)。
+  const mode = usePlotStore((s) => s.mode);
+  const crosshair = usePlotStore((s) => s.crosshair);
+  const showLabels = usePlotStore((s) => s.showLabels);
+  const offset = usePlotStore((s) => s.offset);
+  const showBackground = usePlotStore((s) => s.showBackground);
+  const zoom = usePlotStore((s) => s.zoom);
+  const compareCurves = usePlotStore((s) => s.compareCurves);
 
   /** 归一化到 100 的 y 标度。曲线、背景线、峰标记三者必须用**同一个**
    * maxY,否则一拖 Offset 滑块它们就互相错位。 */
@@ -50,15 +60,21 @@ function XRDChartInner({ onPeakClick }: Props) {
   }, [curve]);
 
   // 数据只转一次;normalization/offset 纯前端(§9.2)
+  /** stacked 模式下主曲线的 lane 偏移。
+   *
+   * 主曲线永远在最上面一条 lane —— 它是当前分析对象,放中间会让用户以为
+   * 那也是一条参考曲线。lane 高度与 compareSeries 保持一致(55)。 */
+  const mainShift = mode === "stacked" ? compareCurves.length * 55 : 0;
+
   const seriesData = useMemo<[number, number][] | null>(() => {
     if (!curve) return null;
     const { x, y } = curve;
     const out: [number, number][] = new Array(x.length);
     for (let i = 0; i < x.length; i++) {
-      out[i] = [x[i], (y[i] / maxY) * 100 + offset];
+      out[i] = [x[i], (y[i] / maxY) * 100 + offset + mainShift];
     }
     return out;
-  }, [curve, offset, maxY]);
+  }, [curve, offset, maxY, mainShift]);
 
   /** 背景曲线(§7.3 Show Background)。引擎只在 background.enabled 时
    * 才返回它,所以关闭背景扣除后这个开关是无效的 —— Inspector 会提示。 */
@@ -68,10 +84,29 @@ function XRDChartInner({ onPeakClick }: Props) {
     if (background.length !== x.length) return null;
     const out: [number, number][] = new Array(x.length);
     for (let i = 0; i < x.length; i++) {
-      out[i] = [x[i], (background[i] / maxY) * 100 + offset];
+      out[i] = [x[i], (background[i] / maxY) * 100 + offset + mainShift];
     }
     return out;
-  }, [curve, offset, maxY]);
+  }, [curve, offset, maxY, mainShift]);
+
+  /** 对比曲线(§S4)。每条**用各自的 maxY 归一化**到同一个 0–100 标度 ——
+   * 若共用当前曲线的 maxY,强度差 10 倍的样品在图上看起来一样高,叠加就
+   * 失去意义。这是"比较"和"拼接"的区别。
+   *
+   * stacked 模式下每加一条就整体抬升一个 lane(offsetStep),让曲线彼此
+   * 错开不重叠;overlay 模式下全部落在同一条基线上。lane 高度取 55 而非
+   * 100:保留重叠余量,否则相邻两条的峰顶会顶到上一条的基线,看着像同一条。 */
+  const compareSeries = useMemo(() => {
+    return compareCurves.map((c) => {
+      const peakY = c.curve.y.reduce((m, v) => (v > m ? v : m), 0) || 1;
+      const shift = mode === "stacked" ? compareCurves.indexOf(c) * 55 : 0;
+      const data: [number, number][] = new Array(c.curve.x.length);
+      for (let i = 0; i < c.curve.x.length; i++) {
+        data[i] = [c.curve.x[i], (c.curve.y[i] / peakY) * 100 + shift];
+      }
+      return { id: c.datasetId, name: c.name, color: c.color, data };
+    });
+  }, [compareCurves, mode]);
 
   const markData = useMemo(() => {
     if (!curve || !showLabels || peaks.length === 0) return undefined;
@@ -79,32 +114,71 @@ function XRDChartInner({ onPeakClick }: Props) {
       name: String(p.index),
       // offset 必须与 seriesData 一致:否则拖 Display 的 Offset 滑块时
       // 曲线上下移动而圆点/标签原地不动,视觉上就是一堆悬空的点
-      coord: [p.position, (p.intensity / maxY) * 100 + offset],
-      value: p.position.toFixed(2) + "°",
+      coord: [p.position, (p.intensity / maxY) * 100 + offset + mainShift],
+      // 有晶面标注优先显示晶面,否则退回 2θ
+      value: p.hkl ?? p.position.toFixed(2) + "°",
       itemStyle: {
         color:
           selectedPeak === p.index ? cssVar("--accent") : "transparent",
       },
       label: {
         show: true,
-        formatter: p.position.toFixed(2) + "°",
+        formatter: () => p.hkl ?? p.position.toFixed(2) + "°",
+        // 恒在点上方。**不要**对贴顶峰改 bottom —— 标签会落在曲线
+        // 上,峰线直接穿过数字。顶部裁切靠 yAxis.max 预留余量解决。
         position: "top" as const,
-        distance: 8,
+        distance: 6,
         fontSize: 10,
+        // 三态必须**视觉可辨**:reliable 用常规色,ambiguous 用弱化色 +
+        // 括号外的问号,未归属用更弱的色。旧实现里三者都是同一个
+        // --text-secondary,用户无法区分"这是 (102)"与"这可能是 (006)
+        // 或 (102),没分开"。把不确定性画出来,比给一个假确定更有用。
         color:
           selectedPeak === p.index
             ? cssVar("--accent")
-            : cssVar("--text-secondary"),
+            : p.hkl_confidence === "ambiguous"
+              ? cssVar("--warning")
+              : p.hkl
+                ? cssVar("--text-secondary")
+                : cssVar("--text-tertiary"),
+        fontStyle:
+          p.hkl_confidence === "ambiguous" ? ("italic" as const) : undefined,
       },
       symbol: "circle",
       symbolSize: selectedPeak === p.index ? 7 : 4,
     }));
-  }, [curve, peaks, showLabels, selectedPeak, offset, maxY]);
+  }, [curve, peaks, showLabels, selectedPeak, offset, maxY, mainShift]);
 
   useEffect(() => {
     if (!ref.current) return;
     const chart = echarts.init(ref.current, undefined, { renderer: "canvas" });
     chartRef.current = chart;
+    usePlotStore.getState().setFigureExporter(() =>
+      chart.getDataURL({
+        type: "png",
+        pixelRatio: 2,
+        backgroundColor: cssVar("--bg-panel"),
+      }),
+    );
+    // SVG:canvas renderer 画不出矢量,导出时离屏用 svg renderer
+    // 重画同一 option —— 导出是低频操作,多一次 init 可接受(F6)。
+    usePlotStore.getState().setFigureSvgExporter(() => {
+      const temp = document.createElement("div");
+      temp.style.width = `${chart.getWidth()}px`;
+      temp.style.height = `${chart.getHeight()}px`;
+      temp.style.position = "fixed";
+      temp.style.left = "-9999px";
+      document.body.appendChild(temp);
+      try {
+        const svgChart = echarts.init(temp, undefined, { renderer: "svg" });
+        svgChart.setOption(chart.getOption());
+        const svg = svgChart.renderToSVGString();
+        svgChart.dispose();
+        return svg;
+      } finally {
+        temp.remove();
+      }
+    });
 
     // 点击图中峰 ↔ 表格联动(§35)。
     // **peaks 必须从 store 现取**:这个 effect 只在挂载时跑一次,闭包捕获
@@ -188,6 +262,8 @@ function XRDChartInner({ onPeakClick }: Props) {
       zr.off("dblclick", onDblClick);
       zr.off("mousemove", onMove);
       zr.off("globalout", onLeave);
+      usePlotStore.getState().setFigureExporter(null);
+      usePlotStore.getState().setFigureSvgExporter(null);
       chart.dispose();
       chartRef.current = null;
     };
@@ -203,7 +279,9 @@ function XRDChartInner({ onPeakClick }: Props) {
       {
         animation: false,
         backgroundColor: "transparent",
-        grid: { top: 28, bottom: 34, left: 52, right: 20 },
+        // top 留 36px:y 轴标题 + 最高峰标签(distance 6 + 字号 10)。
+        // 配合 yAxis.max 顶部余量,标签不会再被 container overflow:hidden 裁掉。
+        grid: { top: 36, bottom: 34, left: 52, right: 20 },
         tooltip: {
           show: crosshair,
           trigger: "axis",
@@ -251,6 +329,17 @@ function XRDChartInner({ onPeakClick }: Props) {
         },
         yAxis: {
           type: "value",
+          // 归一化后最高峰恒在 y=100。若 max 恰等于数据最大值,点贴
+          // grid 顶边,position:"top" 的晶面标签会被裁掉(用户反馈
+          // "峰很高时 003 不显示")。预留约 12% 顶部余量,最高点的
+          // 标签也画在 grid 内,且仍在点上方、不会压住曲线。
+          // 结果**向上取整到整十**:否则轴顶刻度会直接显示
+          // 111.34608864131751 这种裸浮点(用户截图里的长串数字)。
+          max: (value: { min: number; max: number }) => {
+            const span = value.max - value.min;
+            const raw = value.max + Math.max(span * 0.12, 8);
+            return Math.ceil(raw / 10) * 10;
+          },
           axisLine: { show: false },
           axisTick: { show: false },
           splitLine: { show: false },
@@ -261,7 +350,34 @@ function XRDChartInner({ onPeakClick }: Props) {
         dataZoom: [
           { type: "inside", xAxisIndex: 0, filterMode: "none", zoomOnMouseWheel: true, moveOnMouseMove: true },
         ],
+        // 对比曲线画在**主曲线之前**:ECharts 后画的在上层,而当前分析的
+        // 那条曲线带峰标记,必须压在最上面 —— 否则它的峰会被参考曲线盖住,
+        // 用户点了半天选不中。
+        legend: compareSeries.length
+          ? {
+              show: true,
+              top: 0,
+              right: 8,
+              itemWidth: 10,
+              itemHeight: 8,
+              textStyle: { color: cssVar("--text-secondary"), fontSize: 10 },
+              data: compareSeries.map((c) => c.name),
+            }
+          : { show: false },
         series: [
+          ...compareSeries.map((c) => ({
+            type: "line" as const,
+            name: c.name,
+            showSymbol: false,
+            sampling: "lttb" as const,
+            large: true,
+            largeThreshold: 2000,
+            // silent:对比曲线只供目视比较,不参与点击选峰 —— 否则用户点
+            // 一条参考曲线的峰,选中的却是当前数据集的峰,张冠李戴。
+            silent: true,
+            lineStyle: { color: c.color, width: 1, opacity: 0.85 },
+            data: c.data,
+          })),
           ...(bgData && showBackground
             ? [
                 {
@@ -313,7 +429,7 @@ function XRDChartInner({ onPeakClick }: Props) {
     // setXDomain/setZoom(null) 让 xDomain 引用变了却仍是相同数值,
     // 看起来就像"切换数据集后缩放窗口残留"。
     // 依赖 curve 本身(对象引用每次 loadDataset 都是新的)才能真正重绘。
-  }, [curve, seriesData, bgData, markData, crosshair, mode, peaks, selectPeak, onPeakClick, showBackground, xDomain]);
+  }, [curve, seriesData, bgData, markData, crosshair, mode, peaks, selectPeak, onPeakClick, showBackground, xDomain, compareSeries]);
 
   // 把 plotStore.zoom 回放到图上。
   // 值相等短路:本图自己产生的 zoom 已经 appliedZoom 标记过,不必再回放,
@@ -334,11 +450,22 @@ function XRDChartInner({ onPeakClick }: Props) {
 
   // 选中峰变化:平移视口到峰附近并高亮(§35)。
   // 走 setZoom(数据坐标)而不是直接 dispatchAction,这样底部范围框同步跟随。
+  //
+  // **只在"选中的峰真的换了"时平移,不能在 peaks 变化时也平移。**
+  // 依赖里若带上 peaks(它是每次 preview 都会被整体替换的新数组),
+  // 那么拖任何一个滑块、切一次数据集都会把视口重新拽回 ±4° 窗口 ——
+  // 用户表现为"图自己跳走了",而且每次 preview 都多一轮 setZoom →
+  // dataZoom → 重绘。用 ref 记住上次已定位的峰序号来区分这两种情况。
   useEffect(() => {
-    if (selectedPeak == null) return;
+    if (selectedPeak == null) {
+      autoZoomedPeak.current = null;
+      return;
+    }
+    if (autoZoomedPeak.current === selectedPeak) return;
     const peak = peaks.find((p) => p.index === selectedPeak);
     const d = usePlotStore.getState().xDomain;
     if (!peak || !d) return;
+    autoZoomedPeak.current = selectedPeak;
     const span = 4;
     usePlotStore.getState().setZoom({
       from: Math.max(d[0], peak.position - span),

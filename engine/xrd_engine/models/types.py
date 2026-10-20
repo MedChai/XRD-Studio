@@ -170,9 +170,25 @@ class Peak:
     manual_override: bool = False
     # 置信度相关的中间量,导出时可选带出
     prominence: float | None = None
+    # 晶面归属(由 peaks.annotate 填充;未标注时为 None)
+    hkl: str | None = None
+    hkl_confidence: str | None = None
+    # 归属依据。dominance 是本反射在该峰邻域内贡献的强度占比(0-1),
+    # candidates 是竞争候选 —— 前端据此把"为什么是这个晶面"摊开给用户
+    # 核对。**必须一路带到 UI**:CPU 里算完却在写回时丢掉,用户看到的
+    # 就是"归属依据:该反射贡献 0%",比不显示更糟。
+    dominance: float | None = None
+    hkl_candidates: list[dict] | None = None
+    row_id: int | None = None
+    """写入 peaks 表后的主键。仅由 peaks.detect 设置,供后续按主键更新 ——
+    **不要用 position 做相等匹配**:数据库存的是未舍入的双精度值,而
+    调用方往往拿 round(pos, 6) 去查,两者不等时 UPDATE 静默匹配 0 行。"""
 
     def to_dict(self) -> dict:
         return {
+            # row_id:peaks 表主键。detect/annotate 落库后才有值;preview
+            # 的临时峰为 None。前端编辑 bounds 靠它调 peaks.update_bounds。
+            "id": self.row_id,
             "index": self.index,
             "position": self.position,
             "intensity": self.intensity,
@@ -182,6 +198,10 @@ class Peak:
             "right_bound": self.right_bound,
             "manual_override": self.manual_override,
             "prominence": self.prominence,
+            "hkl": self.hkl,
+            "hkl_confidence": self.hkl_confidence,
+            "dominance": self.dominance,
+            "hkl_candidates": self.hkl_candidates,
         }
 
 

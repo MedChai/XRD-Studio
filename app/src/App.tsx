@@ -13,14 +13,18 @@ import { Toast } from "./components/Toast";
 import { NewProjectDialog } from "./components/ProjectSwitcher";
 import { RenameDialog } from "./features/library/RenameDialog";
 import { TrashDialog } from "./features/library/TrashDialog";
+import { SampleInfoDialog } from "./features/library/SampleInfoDialog";
 import { PlotHeader } from "./features/plot/PlotHeader";
 import { XRDChart } from "./features/plot/XRDChart";
 import { RangeOverview } from "./features/plot/RangeOverview";
 import { PeakDrawer } from "./features/peaks/PeakDrawer";
 import { Inspector } from "./features/processing/Inspector";
 import { ImportSheet } from "./features/import/ImportSheet";
+import { CellPage } from "./features/echem/CellPage";
+import { EcImportSheet } from "./features/echem/EcImportSheet";
 import { CommandPalette } from "./features/settings/CommandPalette";
 import { SettingsDialog } from "./features/settings/SettingsDialog";
+import { TrendPanel } from "./features/trend/TrendPanel";
 import {
   applyTheme,
   useAnalysisStore,
@@ -41,7 +45,11 @@ const rangeOverviewHeight = 56;
 export default function App() {
   const theme = useAppStore((s) => s.theme);
   const loadLibrary = useProjectStore((s) => s.load);
-  const { curve, loadedDatasetId } = useAnalysisStore();
+  const curve = useAnalysisStore((s) => s.curve);
+  const loadedDatasetId = useAnalysisStore((s) => s.loadedDatasetId);
+  const cellId = useSelectionStore((s) => s.cellId);
+  const trendOpen = useUiStore((s) => s.trendOpen);
+  const setTrendOpen = useUiStore((s) => s.setTrendOpen);
   const [dragging, setDragging] = useState(false);
 
   // 主题初始化
@@ -55,13 +63,13 @@ export default function App() {
     }
   }, [theme]);
 
-  // Library 加载 + 默认选中第一个数据集
+  // Library 加载 + 默认选中第一个数据集(用户已选电化学 cell 时不抢占)
   useEffect(() => {
     void loadLibrary().then(() => {
       const { samples } = useProjectStore.getState();
-      const { datasetId } = useSelectionStore.getState();
+      const { datasetId, cellId: curCell } = useSelectionStore.getState();
       const first = samples[0]?.datasets[0];
-      if (first && datasetId == null) {
+      if (first && datasetId == null && curCell == null) {
         useSelectionStore.getState().selectDataset(samples[0].id, first.id);
         void useAnalysisStore.getState().loadDataset(first.id);
       }
@@ -74,24 +82,32 @@ export default function App() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const mod = e.ctrlKey || e.metaKey;
+      // 谱图专属快捷键在电化学模式下禁用:撤销栈是标注的、fitAll 是
+      // 谱图的 —— 电化学页里触发只会改到看不见的状态。
+      const ecActive = useSelectionStore.getState().cellId != null;
       if (mod && e.key.toLowerCase() === "k") {
         e.preventDefault();
         useUiStore.getState().setPaletteOpen(!useUiStore.getState().paletteOpen);
       } else if (mod && e.key.toLowerCase() === "z") {
         e.preventDefault();
+        if (ecActive) return;
         if (e.shiftKey) useAnalysisStore.getState().redo();
         else useAnalysisStore.getState().undo();
       } else if (mod && e.key === "i") {
         e.preventDefault();
-        useUiStore.getState().setImportOpen(true);
+        if (ecActive) useUiStore.getState().setEcImportOpen(true);
+        else useUiStore.getState().setImportOpen(true);
       } else if (mod && e.key === "0") {
         // Ctrl+0 = Fit All(与 macOS 惯例一致)
         e.preventDefault();
+        if (ecActive) return;
         usePlotStore.getState().fitAll();
       } else if (e.key === "Escape") {
         useUiStore.getState().setPaletteOpen(false);
         useUiStore.getState().setTrashOpen(false);
         useUiStore.getState().setRenaming(null);
+        // 趋势面板是覆盖层,Esc 应与其它弹层一致可关(B7)
+        useUiStore.getState().setTrendOpen(false);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -122,7 +138,12 @@ export default function App() {
     return () => unlisten?.();
   }, [registerDragDrop]);
 
-  const empty = !curve && loadedDatasetId == null;
+  const empty = !curve && loadedDatasetId == null && cellId == null;
+  /** 选中电化学 cell → 主工作区整体切到电池页面(XRD 图区/峰抽屉/
+   *  范围框都是谱图语境,混排只会互相挤压)。Inspector 同样隐藏 ——
+   *  它整栏是 XRD 处理控件(PROCESSING/HIGH-NI/PEAKS),电化学
+   *  页面里只会误导(且状态栏已同步切换,见 StatusBar)。 */
+  const showEc = cellId != null;
 
   return (
     <div className="flex h-full flex-col">
@@ -130,24 +151,32 @@ export default function App() {
       <div className="flex min-h-0 flex-1">
         <LibrarySidebar />
         <main className="flex min-w-0 flex-1 flex-col">
-          <PlotHeader />
-          <div className="relative min-h-0 flex-1">
-            {empty ? (
-              <EmptyState />
-            ) : (
-              <XRDChart />
-            )}
-            {dragging && <DropOverlay />}
-          </div>
-          <PeakDrawer />
+          {showEc ? (
+            <div className="min-h-0 flex-1">
+              <CellPage />
+            </div>
+          ) : (
+            <>
+              <PlotHeader />
+              <div className="relative min-h-0 flex-1">
+                {empty ? (
+                  <EmptyState />
+                ) : (
+                  <XRDChart />
+                )}
+                {dragging && <DropOverlay />}
+              </div>
+              <PeakDrawer />
+            </>
+          )}
         </main>
-        <Inspector />
+        {!showEc && <Inspector />}
       </div>
       {/* 底部通栏范围框:横跨 Sidebar + 绘图区 + Inspector。
           内部左右留出与两栏等宽的内边距,使缩略图与绘图区对齐,
           而容器底色保持通栏 —— 视觉上是"通栏分隔带 + 居中的缩略图"。
           没有曲线时不占位,免得空状态下方多一条空白带。 */}
-      {!empty && (
+      {!empty && !showEc && (
         <div
           className="shrink-0 border-t border-[var(--divider)] bg-[var(--bg-panel)]"
           style={{ height: rangeOverviewHeight }}
@@ -163,11 +192,14 @@ export default function App() {
       <StatusBar />
 
       <ImportSheet />
+      <EcImportSheet />
       <NewProjectDialog />
       <RenameDialog />
       <TrashDialog />
+      <SampleInfoDialog />
       <CommandPalette />
       <SettingsDialog />
+      {trendOpen && <TrendPanel onClose={() => setTrendOpen(false)} />}
       <Toast />
     </div>
   );

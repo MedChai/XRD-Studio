@@ -12,7 +12,9 @@ import * as Dialog from "@radix-ui/react-dialog";
 import { useEffect, useState } from "react";
 import { Database, FolderOpen, RotateCcw, Trash2, X } from "lucide-react";
 import { Button } from "../../components/controls";
-import { useProjectStore, useUiStore } from "../../stores";
+import { usePlotStore, useProjectStore, useUiStore } from "../../stores";
+import { COMPARE_COLORS, DISPLAY_MAX_POINTS, engineCommand, revealInExplorer } from "../../services/engine";
+import type { CurvePayload } from "../../types/engine";
 import type { TrashItem, TrashKind } from "../../types/engine";
 import { t } from "../../i18n";
 import { cn } from "../../components/cn";
@@ -20,14 +22,16 @@ import { cn } from "../../components/cn";
 const KIND_LABEL: Record<TrashKind, string> = {
   projects: t.trash.kindProjects,
   samples: t.trash.kindSamples,
+  batches: t.trash.kindBatches,
   datasets: t.trash.kindDatasets,
+  ec_cells: t.trash.kindEcCells,
 };
 
 function pathOf(item: TrashItem): string {
   const parts: string[] = [];
   if (item.projectName) parts.push(item.projectName);
   if (item.sampleName) parts.push(item.sampleName);
-  if (item.kind === "datasets") parts.push(item.name);
+  if (item.kind === "datasets" || item.kind === "ec_cells") parts.push(item.name);
   return parts.join(" / ");
 }
 
@@ -162,6 +166,34 @@ export function TrashDialog() {
 }
 
 /** 侧栏条目上的「⋯」菜单项集合,复用同一套文案与危险色。 */
+/** 把一条数据集加入对比。曲线走 datasets.curve 单独取 —— 不走 analysisStore,
+ *  因为对比曲线不是"当前分析对象",不该影响峰表与指标。 */
+async function addCompare(
+  datasetId: number,
+  name: string,
+  showToast: (kind: "success" | "error", msg: string) => void,
+): Promise<void> {
+  const store = usePlotStore.getState();
+  if (store.compareCurves.length >= 6) {
+    showToast("error", t.library.compareFull);
+    return;
+  }
+  const r = await engineCommand<CurvePayload>("datasets.curve", {
+    id: datasetId,
+    max_points: DISPLAY_MAX_POINTS,
+  });
+  if (!r.ok) {
+    showToast("error", r.error);
+    return;
+  }
+  store.addCompareCurve({
+    datasetId,
+    name,
+    color: COMPARE_COLORS[store.compareCurves.length % COMPARE_COLORS.length],
+    curve: r.data,
+  });
+}
+
 export function RowMenuItems({
   table,
   id,
@@ -174,7 +206,12 @@ export function RowMenuItems({
   onClose: () => void;
 }) {
   const setRenaming = useUiStore((s) => s.setRenaming);
+  const setEditingSample = useUiStore((s) => s.setEditingSample);
   const deleteItem = useProjectStore((s) => s.deleteItem);
+  const showToast = useUiStore((s) => s.showToast);
+  const inCompare = usePlotStore((s) =>
+    s.compareCurves.some((c) => c.datasetId === id),
+  );
   return (
     <div className="flex flex-col">
       <button
@@ -186,6 +223,55 @@ export function RowMenuItems({
       >
         {t.library.rename}
       </button>
+      {/* 实验元数据(温度/时长/波长…)是趋势图自变量,必须有编辑入口。
+          此前 SampleInfoDialog 写好了却从未挂载/接线,用户填不了温度。 */}
+      {table === "samples" && (
+        <button
+          className="tr flex items-center gap-2 rounded-[var(--radius-control)] px-2.5 py-1.5 text-left text-[13px] text-[var(--text-primary)] hover:bg-[var(--hover)]"
+          onClick={() => {
+            onClose();
+            setEditingSample({ id, name });
+          }}
+        >
+          {t.sample.edit}
+        </button>
+      )}
+      {/* 只有数据集能加入对比 —— 项目/实验/批次是容器,没有曲线可画 */}
+      {table === "datasets" && (
+        <button
+          className="tr flex items-center gap-2 rounded-[var(--radius-control)] px-2.5 py-1.5 text-left text-[13px] text-[var(--text-primary)] hover:bg-[var(--hover)]"
+          onClick={() => {
+            onClose();
+            if (inCompare) {
+              usePlotStore.getState().removeCompareCurve(id);
+              return;
+            }
+            void addCompare(id, name, showToast);
+          }}
+        >
+          {inCompare ? t.library.removeFromCompare : t.library.addToCompare}
+        </button>
+      )}
+      {/* 文件型对象才有磁盘位置。右键行与「⋯」菜单共用本组件 → 两处都有。 */}
+      {(table === "datasets" || table === "ec_cells") && (
+        <button
+          className="tr flex items-center gap-2 rounded-[var(--radius-control)] px-2.5 py-1.5 text-left text-[13px] text-[var(--text-primary)] hover:bg-[var(--hover)]"
+          onClick={() => {
+            onClose();
+            void (async () => {
+              const res = await revealInExplorer(table, id);
+              if (!res.ok) {
+                useUiStore.getState().showToast("error", res.error);
+              } else if (res.mode === "degraded") {
+                // 浏览器 dev 打不开资源管理器 → 至少把路径给出来
+                useUiStore.getState().showToast("success", t.library.revealPath(res.path));
+              }
+            })();
+          }}
+        >
+          {t.library.revealInDir}
+        </button>
+      )}
       <button
         className={cn(
           "tr flex items-center gap-2 rounded-[var(--radius-control)] px-2.5 py-1.5 text-left text-[13px]",

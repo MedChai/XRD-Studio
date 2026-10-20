@@ -10,16 +10,51 @@ import sqlite3
 import threading
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 7
+
+# 从 v2 → v3 的增量迁移(向后兼容,已存在的库只加列不重建表)。
+# (schema_version, table, column, ddl) —— ddl 执行前会先判列是否存在。
+_MIGRATIONS: tuple[tuple[int, str, str, str], ...] = (
+    (3, "peaks", "hkl", "ALTER TABLE peaks ADD COLUMN hkl TEXT"),
+    (3, "peaks", "hkl_confidence", "ALTER TABLE peaks ADD COLUMN hkl_confidence TEXT"),
+    # v4:把归属依据持久化。此前 dominance 只在内存里算出来,写 peaks 表时
+    # 被丢掉 —— 重新加载数据集后前端只能显示"贡献 0%"。
+    (4, "peaks", "dominance", "ALTER TABLE peaks ADD COLUMN dominance REAL"),
+    (
+        4, "peaks", "hkl_candidates",
+        "ALTER TABLE peaks ADD COLUMN hkl_candidates TEXT",
+    ),
+    # v5:批次分组。同一次制样/同一批送样的多个数据集归一组。
+    # 用可空列而不是独立关联表:一条数据集至多属于一个批次,多对多
+    # 只会让"这条数据属于哪批"变成需要 JOIN 才能回答的问题。
+    (
+        5, "datasets", "batch_id",
+        "ALTER TABLE datasets ADD COLUMN batch_id INTEGER REFERENCES batches(id)",
+    ),
+    # v5:库外原始目录。用户的数据往往按文件夹组织(一个文件夹一次实验),
+    # 记下来才能在重新导入时认出"这个文件夹已经导过了"。
+    (
+        5, "samples", "links_json",
+        "ALTER TABLE samples ADD COLUMN links_json TEXT DEFAULT '[]'",
+    ),
+    # v6:晶面标注持久化。逐峰 hkl 早已在 peaks 表,但全谱精修上下文
+    # (a/c/zeroShift/rwp) 与 labels 快照此前只存内存/组件 state,重启即丢;
+    # 而 peaks 行会被 analysis.commit 在参数变更时删除,context 无处可存。
+    (
+        6, "analyses", "annotation_json",
+        "ALTER TABLE analyses ADD COLUMN annotation_json TEXT",
+    ),
+)
 
 # 允许软删除的表。**不要用 assert 做这个校验**:
 # `python -O` 会移除 assert,那时非法表名会直接拼进 SQL,变成注入面;
 # 而且 assert 抛的 AssertionError 会被 api 层兜底成"引擎内部错误",
 # 用户看不到人话。这里用真异常,由调用方翻译成中文提示。
-ALLOWED_TABLES = ("projects", "samples", "datasets")
+ALLOWED_TABLES = ("projects", "samples", "datasets", "batches", "ec_cells")
 
-# 三类可删除对象的层级(浅 → 深),purge 必须按此顺序深度优先处理
-_TABLE_DEPTH = {"projects": 0, "samples": 1, "datasets": 2}
+# 可删除对象的层级(浅 → 深),purge 必须按此顺序深度优先处理
+# ec_cells 与 datasets 同层:都直接挂在 sample 下,互不为父子。
+_TABLE_DEPTH = {"projects": 0, "samples": 1, "batches": 2, "datasets": 3, "ec_cells": 3}
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS projects (
@@ -45,6 +80,7 @@ CREATE TABLE IF NOT EXISTS samples (
     wavelength REAL DEFAULT 1.5418,
     notes TEXT DEFAULT '',
     tags TEXT DEFAULT '',
+    links_json TEXT DEFAULT '[]',
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     deleted_at TEXT
@@ -64,6 +100,7 @@ CREATE TABLE IF NOT EXISTS datasets (
     step REAL,
     point_count INTEGER,
     grid TEXT DEFAULT 'uniform',
+    batch_id INTEGER REFERENCES batches(id),
     imported_at TEXT NOT NULL DEFAULT (datetime('now')),
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -76,6 +113,7 @@ CREATE TABLE IF NOT EXISTS analyses (
     preset_id INTEGER REFERENCES analysis_presets(id),
     pipeline_json TEXT NOT NULL DEFAULT '{}',
     is_active INTEGER NOT NULL DEFAULT 1,
+    annotation_json TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -90,8 +128,23 @@ CREATE TABLE IF NOT EXISTS peaks (
     left_bound REAL,
     right_bound REAL,
     manual_override INTEGER NOT NULL DEFAULT 0,
+    hkl TEXT,
+    hkl_confidence TEXT,
+    dominance REAL,
+    hkl_candidates TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS batches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sample_id INTEGER NOT NULL REFERENCES samples(id),
+    name TEXT NOT NULL,
+    source_path TEXT DEFAULT '',
+    notes TEXT DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    deleted_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS analysis_presets (
@@ -103,12 +156,97 @@ CREATE TABLE IF NOT EXISTS analysis_presets (
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS material_profiles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL REFERENCES projects(id),
+    name TEXT NOT NULL,
+    family TEXT NOT NULL DEFAULT 'high_ni_layered',
+    formula TEXT NOT NULL DEFAULT '',
+    ni_fraction REAL,
+    li_tm_ratio REAL,
+    dopants_json TEXT NOT NULL DEFAULT '{}',
+    wavelength REAL,
+    instrument_name TEXT NOT NULL DEFAULT '',
+    reference_dataset_id INTEGER REFERENCES datasets(id),
+    thresholds_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS domain_results (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    analysis_id INTEGER NOT NULL REFERENCES analyses(id),
+    profile_id INTEGER REFERENCES material_profiles(id),
+    domain TEXT NOT NULL,
+    result_json TEXT NOT NULL,
+    warnings_json TEXT NOT NULL DEFAULT '[]',
+    source_hash TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_samples_project ON samples(project_id);
 CREATE INDEX IF NOT EXISTS idx_datasets_sample ON datasets(sample_id);
 CREATE INDEX IF NOT EXISTS idx_datasets_hash ON datasets(file_hash);
 CREATE INDEX IF NOT EXISTS idx_analyses_dataset ON analyses(dataset_id);
 CREATE INDEX IF NOT EXISTS idx_peaks_analysis ON peaks(analysis_id);
+CREATE INDEX IF NOT EXISTS idx_batches_sample ON batches(sample_id);
 CREATE INDEX IF NOT EXISTS idx_presets_project ON analysis_presets(project_id);
+CREATE INDEX IF NOT EXISTS idx_profiles_project ON material_profiles(project_id);
+CREATE INDEX IF NOT EXISTS idx_domain_results_analysis
+    ON domain_results(analysis_id, domain);
+
+-- v7: 电化学(LAND)数据。ec_cells 与 datasets 平行挂 sample 下;
+-- 圈统计与分析结果(峰/轨迹/归因)单表存 JSON,dQ/dV 曲线数组存
+-- data 目录的 npz(数据库只放参数与指纹,曲线走二进制信封)。
+CREATE TABLE IF NOT EXISTS ec_cells (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sample_id INTEGER NOT NULL REFERENCES samples(id),
+    name TEXT NOT NULL,
+    original_filename TEXT NOT NULL,
+    source_path TEXT DEFAULT '',
+    stored_path TEXT NOT NULL,
+    file_hash TEXT NOT NULL,
+    format TEXT DEFAULT '',
+    active_mass_mg REAL,
+    meta_json TEXT NOT NULL DEFAULT '{}',
+    imported_at TEXT NOT NULL DEFAULT (datetime('now')),
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    deleted_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS ec_cycles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cell_id INTEGER NOT NULL REFERENCES ec_cells(id),
+    cycle_index INTEGER NOT NULL,
+    q_charge REAL,
+    q_discharge REAL,
+    ce REAL,
+    i_med_charge REAL,
+    i_med_discharge REAL,
+    v_min REAL,
+    v_max REAL,
+    rate_group TEXT NOT NULL DEFAULT 'main',
+    incomplete INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(cell_id, cycle_index)
+);
+
+CREATE TABLE IF NOT EXISTS ec_analyses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cell_id INTEGER NOT NULL REFERENCES ec_cells(id),
+    kind TEXT NOT NULL,
+    params_json TEXT NOT NULL DEFAULT '{}',
+    params_hash TEXT NOT NULL DEFAULT '',
+    result_json TEXT NOT NULL DEFAULT '{}',
+    is_active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_ec_cells_sample ON ec_cells(sample_id);
+CREATE INDEX IF NOT EXISTS idx_ec_cycles_cell ON ec_cycles(cell_id, cycle_index);
+CREATE INDEX IF NOT EXISTS idx_ec_analyses_cell ON ec_analyses(cell_id, kind);
 """
 
 
@@ -135,6 +273,23 @@ class Database:
         conn = self._conn()
         with conn:
             conn.executescript(_SCHEMA)
+            # 增量迁移:对已有库只加列,不重建表。逐列判存在,幂等。
+            #
+            # version 字段是**真正的门控**:库里已经到 v3 时不该再跑 v3 的
+            # 迁移。此前这个字段被 `for _version, ...` 丢掉,靠"逐列判存在"
+            # 兜底 —— 结果正确但版本号形同虚设,新增迁移时无法靠它跳过,
+            # 也无法判断某个 DDL 该不该执行。这里读一次 user_version 固定
+            # 本次迁移的目标,后续比较才有意义。
+            current = int(conn.execute("PRAGMA user_version").fetchone()[0])
+            for version, table, col, ddl in _MIGRATIONS:
+                if current >= version:
+                    continue
+                cols = {
+                    row["name"].lower()
+                    for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+                }
+                if col not in cols:
+                    conn.execute(ddl)
             conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
     def execute(self, sql: str, params: tuple = ()) -> sqlite3.Cursor:
@@ -179,10 +334,18 @@ class Database:
         )
 
     def get_library_tree(self) -> list[sqlite3.Row]:
-        """返回未删除的 library 树(Sample 视图,含所属 Project 名)。"""
+        """返回未删除的 library 树(Sample 视图,含所属 Project 名)。
+
+        **必须带全样品元数据**:温度/批次/材料这些字段是结构趋势图的自变量
+        (docs/DEVELOPMENT_HIGH_NI.md §11.4)。此前只返回 id/name/temperature/
+        duration,前端拿不到 material 与 wavelength —— 用户填了也看不到,
+        趋势图更无从按温度分组。
+        """
         return self.query_all(
             """SELECT s.id, s.project_id, s.name, s.sample_code,
-                      s.temperature, s.duration, p.name AS project_name,
+                      s.temperature, s.duration, s.material, s.batch,
+                      s.wavelength, s.notes, s.links_json,
+                      p.name AS project_name,
                       (SELECT COUNT(*) FROM datasets d
                        WHERE d.sample_id = s.id AND d.deleted_at IS NULL
                       ) AS dataset_count
@@ -190,6 +353,22 @@ class Database:
                JOIN projects p ON s.project_id = p.id
                WHERE s.deleted_at IS NULL AND p.deleted_at IS NULL
                ORDER BY p.name, s.name"""
+        )
+
+    def get_batches(self) -> list[sqlite3.Row]:
+        """未删除的批次,含所属 sample / project 名,供 library.tree 挂到样品下。"""
+        return self.query_all(
+            """SELECT b.id, b.sample_id, b.name, b.source_path, b.notes,
+                      s.name AS sample_name, p.name AS project_name,
+                      (SELECT COUNT(*) FROM datasets d
+                       WHERE d.batch_id = b.id AND d.deleted_at IS NULL
+                      ) AS dataset_count
+               FROM batches b
+               JOIN samples s ON b.sample_id = s.id
+               JOIN projects p ON s.project_id = p.id
+               WHERE b.deleted_at IS NULL
+                 AND s.deleted_at IS NULL AND p.deleted_at IS NULL
+               ORDER BY b.name"""
         )
 
     def soft_delete(self, table: str, row_id: int) -> bool:
@@ -239,6 +418,11 @@ class Database:
         self._check_table(table)
         if table == "datasets":
             return 0
+        if table == "batches":
+            sql = """SELECT COUNT(*) AS n FROM datasets
+                     WHERE batch_id = ? AND deleted_at IS NULL"""
+            row = self.query_one(sql, (row_id,))
+            return int(row["n"]) if row else 0
         if table == "samples":
             sql = """SELECT COUNT(*) AS n FROM datasets
                      WHERE sample_id = ? AND deleted_at IS NULL"""
@@ -274,6 +458,27 @@ class Database:
                JOIN projects p ON s.project_id = p.id
                WHERE d.deleted_at IS NOT NULL
                UNION ALL
+               SELECT 'ec_cells' AS kind, c.id AS id, c.name AS name,
+                      c.deleted_at AS deleted_at,
+                      p.name AS project_name, s.name AS sample_name,
+                      c.stored_path AS stored_path, 0 AS child_count
+               FROM ec_cells c
+               JOIN samples s ON c.sample_id = s.id
+               JOIN projects p ON s.project_id = p.id
+               WHERE c.deleted_at IS NOT NULL
+               UNION ALL
+               SELECT 'batches' AS kind, b.id AS id, b.name AS name,
+                      b.deleted_at AS deleted_at,
+                      p.name AS project_name, s.name AS sample_name,
+                      NULL AS stored_path,
+                      (SELECT COUNT(*) FROM datasets d3
+                       WHERE d3.batch_id = b.id AND d3.deleted_at IS NULL
+                      ) AS child_count
+               FROM batches b
+               JOIN samples s ON b.sample_id = s.id
+               JOIN projects p ON s.project_id = p.id
+               WHERE b.deleted_at IS NOT NULL
+               UNION ALL
                SELECT 'samples' AS kind, s.id AS id, s.name AS name,
                       s.deleted_at AS deleted_at,
                       p.name AS project_name, NULL AS sample_name,
@@ -300,14 +505,24 @@ class Database:
         )
 
     def dataset_ids_of(self, table: str, row_id: int) -> list[sqlite3.Row]:
-        """列出某对象下所有 dataset 的 (id, stored_path),供 purge 删磁盘。
+        """列出某对象下所有可清磁盘对象的 (id, stored_path),供 purge。
 
         必须在删 DB 行**之前**调用 —— 行删了就查不到 stored_path 了。
+        ec_cells 与 datasets 一样直接返回自身行;删 sample/project 时
+        ec 的 stored_path 由 purge_sample 内部返回(命令层合并处理)。
         """
         self._check_table(table)
         if table == "datasets":
             return self.query_all(
                 "SELECT id, stored_path FROM datasets WHERE id = ?", (row_id,)
+            )
+        if table == "ec_cells":
+            return self.query_all(
+                "SELECT id, stored_path FROM ec_cells WHERE id = ?", (row_id,)
+            )
+        if table == "batches":
+            return self.query_all(
+                "SELECT id, stored_path FROM datasets WHERE batch_id = ?", (row_id,)
             )
         if table == "samples":
             return self.query_all(
@@ -319,6 +534,22 @@ class Database:
                WHERE s.project_id = ?""",
             (row_id,),
         )
+
+    def purge_ec_cell(self, cell_id: int) -> list[str]:
+        """永久删除一个 ec_cell 及其分析结果,返回 stored_path 列表。
+
+        同目录下的派生文件(records.npz / dqdv_*.npz)由命令层枚举清理,
+        DB 层不碰磁盘(与 purge_dataset 的职责边界一致)。
+        """
+        row = self.query_one(
+            "SELECT stored_path FROM ec_cells WHERE id = ?", (cell_id,)
+        )
+        if row is None:
+            return []
+        self.execute("DELETE FROM ec_analyses WHERE cell_id = ?", (cell_id,))
+        self.execute("DELETE FROM ec_cycles WHERE cell_id = ?", (cell_id,))
+        self.execute("DELETE FROM ec_cells WHERE id = ?", (cell_id,))
+        return [row["stored_path"]]
 
     def purge_dataset(self, dataset_id: int) -> str | None:
         """**永久删除**一个 dataset 及其分析结果,返回它的 stored_path。
@@ -333,10 +564,22 @@ class Database:
         if row is None:
             return None
         stored = row["stored_path"]
-        # peaks → analyses → datasets,由深到浅(外键约束已开启)
+        # domain_results → peaks → analyses → datasets,由深到浅(外键约束已开启)
+        self.execute(
+            "DELETE FROM domain_results WHERE analysis_id IN "
+            "(SELECT id FROM analyses WHERE dataset_id = ?)",
+            (dataset_id,),
+        )
         self.execute(
             """DELETE FROM peaks WHERE analysis_id IN
                  (SELECT id FROM analyses WHERE dataset_id = ?)""",
+            (dataset_id,),
+        )
+        # material profiles may point at a reference dataset; clear that
+        # optional link before removing the dataset.
+        self.execute(
+            "UPDATE material_profiles SET reference_dataset_id = NULL "
+            "WHERE reference_dataset_id = ?",
             (dataset_id,),
         )
         self.execute("DELETE FROM analyses WHERE dataset_id = ?", (dataset_id,))
@@ -344,7 +587,7 @@ class Database:
         return stored
 
     def purge_sample(self, sample_id: int) -> list[str]:
-        """永久删除一个 sample 及其全部 dataset,返回要清理的 stored_path 列表。"""
+        """永久删除一个 sample 及其全部 dataset / ec_cell,返回要清理的 stored_path 列表。"""
         paths = [
             r["stored_path"]
             for r in self.query_all(
@@ -358,11 +601,21 @@ class Database:
             )
         ]:
             self.purge_dataset(ds_id)
+        # 电化学 cell 同属 sample:ec_analyses → ec_cycles → ec_cells(外键序)
+        for cell_id in [
+            r["id"]
+            for r in self.query_all(
+                "SELECT id FROM ec_cells WHERE sample_id = ?", (sample_id,)
+            )
+        ]:
+            paths.extend(self.purge_ec_cell(cell_id))
+        # datasets 清完后 batches 已无引用者,但外键仍在,必须先删
+        self.execute("DELETE FROM batches WHERE sample_id = ?", (sample_id,))
         self.execute("DELETE FROM samples WHERE id = ?", (sample_id,))
         return paths
 
     def purge_project(self, project_id: int) -> list[str]:
-        """永久删除一个 project 及其全部 sample / dataset / preset。"""
+        """永久删除一个 project 及其全部 sample / dataset / ec_cell / preset。"""
         paths = [
             r["stored_path"]
             for r in self.query_all(
@@ -378,7 +631,11 @@ class Database:
                 "SELECT id FROM samples WHERE project_id = ?", (project_id,)
             )
         ]:
-            self.purge_sample(sample_id)
+            # purge_sample 的返回值含 ec 文件的 stored_path,不能丢
+            paths.extend(self.purge_sample(sample_id))
+        self.execute(
+            "DELETE FROM material_profiles WHERE project_id = ?", (project_id,)
+        )
         # presets 有 project_id 外键,不清会留下孤儿行,且删 project 时
         # 会被 PRAGMA foreign_keys=ON 拦下
         self.execute("DELETE FROM analysis_presets WHERE project_id = ?", (project_id,))
