@@ -52,15 +52,15 @@ export function OverviewTab({ overview }: { overview: EcCellOverview }) {
       .filter((c) => !c.incomplete && c.ce > 0)
       .map((c) => [c.cycle, c.ce]);
     // 充电叠加时放电系列加 ·放 后缀,否则保持原名(不打扰既有习惯)
-    const sD = showCharge ? "·放" : "";
+    const sD = showCharge ? t.echem.legendDischargeSuffix : "";
     const out: EcSeries[] = [
       { name: `${t.echem.rateMain}${sD}`, data: main, color: COLOR_MAIN },
     ];
     if (showCharge)
-      out.push({ name: `${t.echem.rateMain}·充`, data: mainC, color: COLOR_MAIN, dashed: true });
+      out.push({ name: `${t.echem.rateMain}${t.echem.legendChargeSuffix}`, data: mainC, color: COLOR_MAIN, dashed: true });
     out.push({ name: `${t.echem.rateSlow}${sD}`, data: slow, color: COLOR_SLOW });
     if (showCharge)
-      out.push({ name: `${t.echem.rateSlow}·充`, data: slowC, color: COLOR_SLOW, dashed: true });
+      out.push({ name: `${t.echem.rateSlow}${t.echem.legendChargeSuffix}`, data: slowC, color: COLOR_SLOW, dashed: true });
     out.push({
       name: `${t.echem.incompleteCycle}${sD}`,
       data: incomplete,
@@ -69,7 +69,7 @@ export function OverviewTab({ overview }: { overview: EcCellOverview }) {
     });
     if (showCharge)
       out.push({
-        name: `${t.echem.incompleteCycle}·充`,
+        name: `${t.echem.incompleteCycle}${t.echem.legendChargeSuffix}`,
         data: incompleteC,
         color: COLOR_INCOMPLETE,
         dashed: true,
@@ -112,7 +112,7 @@ export function OverviewTab({ overview }: { overview: EcCellOverview }) {
         y2Name={t.echem.ceAxis}
         y2Percent
         height={300}
-        exportName={`${overview.name}_总览`}
+        exportName={`${overview.name}${t.echem.exportOverviewSuffix}`}
       />
 
       {/* 测试信息折叠区:程序与 QA 是"数据可信度"的依据,默认收起,
@@ -126,7 +126,7 @@ export function OverviewTab({ overview }: { overview: EcCellOverview }) {
           {t.echem.metaTitle}
           <span className="ml-2 truncate text-[11px] text-[var(--text-tertiary)]">
             {overview.session.test_name}
-            {overview.session.channel && ` · 通道 ${overview.session.channel}`}
+            {overview.session.channel && ` · ${t.echem.channelLabel} ${overview.session.channel}`}
           </span>
         </button>
         {metaOpen && (
@@ -135,7 +135,7 @@ export function OverviewTab({ overview }: { overview: EcCellOverview }) {
               <span>
                 {t.echem.metaTitle}: {overview.session.test_name || "—"}
               </span>
-              <span>通道: {overview.session.channel || "—"}</span>
+              <span>{t.echem.channelColon(overview.session.channel || "—")}</span>
               <span>{overview.session.start_time}</span>
               <span>→ {overview.session.end_time}</span>
               {overview.massMg != null && <span>m = {overview.massMg.toFixed(2)} mg</span>}

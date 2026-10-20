@@ -59,6 +59,21 @@ export const t = {
     open: "结构趋势",
     sourceHint:
       "晶胞参数取自全谱精修(与晶面标注同源,含零点校正)。空心点表示该数据集尚未运行结构分析,不参与连线。",
+    /** 轴/指标显示名。a / c / c·a⁻¹ 是领域记号,保留符号本身 */
+    metrics: {
+      a: "a (Å)",
+      c: "c (Å)",
+      c_over_a: "c/a",
+      cell_volume: "晶胞体积 (Å³)",
+      i003_i104: "I(003)/I(104)",
+      fwhm_003: "FWHM(003)",
+      rwp: "Rwp",
+    } as Record<string, string>,
+    axes: {
+      temperature: "煅烧温度",
+      batch: "批次",
+      index: "导入顺序",
+    } as Record<string, string>,
   },
 
   library: {
@@ -137,6 +152,12 @@ export const t = {
     /** 「彻底删除」是不可恢复的,文案必须说清后果 */
     purgeWarning: "彻底删除后数据与文件都无法恢复。",
     childHint: (n: number) => `含 ${n} 个子项`,
+    /** 操作结果 toast(此前硬编码在 store 里) */
+    toastDeleted: (n: number) => (n > 0 ? `已移入回收站(含 ${n} 个数据集)` : "已移入回收站"),
+    toastRestored: (names: string) =>
+      names ? `已恢复(并一并恢复其所属 ${names})` : "已恢复",
+    toastPurged: "已彻底删除",
+    toastEmptied: "回收站已清空",
   },
 
   status: {
@@ -170,6 +191,7 @@ export const t = {
     noProfile: "暂无材料档案",
     createProfile: "新建档案",
     profileCreated: "材料档案已创建",
+    defaultProfileName: "高镍无钴层状默认档案",
     runHighNi: "运行高镍分析",
     highNiRunning: "分析中…",
     highNiDone: "高镍分析完成",
@@ -278,6 +300,17 @@ export const t = {
     boundsInvalid: "右界必须大于左界",
     boundsSaved: "边界已更新,面积已重算",
     manualBadge: "手动",
+    /** 晶面悬停提示:把归属依据摊开(§14 dominance 一路带到 UI) */
+    hkl: {
+      ambiguousAlts: (alts: string) => `双峰未分开,候选:${alts}`,
+      ambiguous: "双峰未分开,无法唯一归属",
+      noneWeak: (weak: string) =>
+        `该 2θ 处没有占主导的 R-3m 允许反射 —— 近邻弱匹配:${weak}(疑似杂相或未建模峰)`,
+      none: "该 2θ 附近没有本物相(R-3m)的允许反射,可能是杂相或未建模的峰",
+      noneShare: (base: string, pct: string) => `${base}(最强也仅占 ${pct}%)`,
+      dominance: (pct: string) => `归属依据:该反射贡献 ${pct}%`,
+      others: (alts: string) => `附近还有:${alts}`,
+    },
   },
 
   import: {
@@ -416,6 +449,12 @@ export const t = {
     rateSlow: "低倍率圈",
     rateFast: "高倍率圈",
     incompleteCycle: "不完整末圈(测试中止)",
+    /** 充放同图的图例后缀 / 导出名 / 通道标签(此前硬编码在 OverviewTab) */
+    legendDischargeSuffix: "·放",
+    legendChargeSuffix: "·充",
+    exportOverviewSuffix: "_总览",
+    channelLabel: "通道",
+    channelColon: (ch: string) => `通道: ${ch}`,
     metaTitle: "测试信息",
     loading: "加载中…",
     /** 测试信息折叠区的 QA 行(此前硬编码在 OverviewTab) */

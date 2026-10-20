@@ -224,7 +224,7 @@ export function Inspector() {
     if (profileProjectId == null) return;
     const result = await engineCommand<{ profileId: number }>("profiles.create", {
       project_id: profileProjectId,
-      name: "高镍无钴层状默认档案",
+      name: t.inspector.defaultProfileName,
       formula: "LiNi0.90Mn0.05Al0.05O2",
       ni_fraction: 0.90,
       li_tm_ratio: 1.0,

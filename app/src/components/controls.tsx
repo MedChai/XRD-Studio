@@ -1,7 +1,7 @@
 /** 控件库:全部走设计 token,禁止硬编码色值(§6)。 */
 
 import * as ToggleGroup from "@radix-ui/react-toggle-group";
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { cn } from "./cn";
 
 export function Button({
@@ -166,16 +166,34 @@ export function NumberField({
   min?: number;
   max?: number;
 }) {
+  // 草稿态:受控 value 直接绑数字时,清空输入会被 Number("")===0 立刻
+  // 打回 0,用户没法删掉旧值重输(症状是"输入框改不动")
+  const [draft, setDraft] = useState<string | null>(null);
+  const commit = (raw: string) => {
+    const v = Number(raw);
+    if (raw.trim() !== "" && Number.isFinite(v)) {
+      let out = v;
+      if (min != null && out < min) out = min;
+      if (max != null && out > max) out = max;
+      onChange(out);
+    }
+    setDraft(null);
+  };
   return (
     <span className="inline-flex items-center gap-1">
       <input
         type="number"
-        value={value}
+        value={draft ?? String(value)}
         min={min}
         max={max}
         onChange={(e) => {
+          setDraft(e.target.value);
           const v = Number(e.target.value);
-          if (Number.isFinite(v)) onChange(v);
+          if (e.target.value !== "" && Number.isFinite(v)) onChange(v);
+        }}
+        onBlur={(e) => commit(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") commit((e.target as HTMLInputElement).value);
         }}
         className="tabular rounded-[var(--radius-input)] border border-[var(--divider)] bg-[var(--bg-panel)] px-1.5 py-0.5 text-right text-[12px] focus:border-[var(--accent)] focus:outline-none"
         style={{ width }}

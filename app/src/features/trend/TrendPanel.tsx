@@ -26,21 +26,9 @@ function cssVar(name: string): string {
 }
 
 /** y 轴指标的中文名。保留 a / c / c·a⁻¹ 这些符号本身 —— 它们是领域记号。 */
-const METRIC_LABEL: Record<string, string> = {
-  a: "a (Å)",
-  c: "c (Å)",
-  c_over_a: "c/a",
-  cell_volume: "晶胞体积 (Å³)",
-  i003_i104: "I(003)/I(104)",
-  fwhm_003: "FWHM(003)",
-  rwp: "Rwp",
-};
+const METRIC_LABEL: Record<string, string> = t.trend.metrics;
 
-const AXIS_LABEL: Record<string, string> = {
-  temperature: "煅烧温度",
-  batch: "批次",
-  index: "导入顺序",
-};
+const AXIS_LABEL: Record<string, string> = t.trend.axes;
 
 export function TrendPanel({ onClose }: { onClose: () => void }) {
   const projectId = useProjectStore((s) => s.currentProjectId);

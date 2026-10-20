@@ -174,10 +174,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       }
     }
     const n = r.data.cascadedDatasets;
-    useUiStore.getState().showToast(
-      "success",
-      n > 0 ? `已移入回收站(含 ${n} 个数据集)` : "已移入回收站",
-    );
+    useUiStore.getState().showToast("success", t.trash.toastDeleted(n));
     return true;
   },
 
@@ -197,9 +194,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     const anc = r.data.restoredAncestors;
     useUiStore.getState().showToast(
       "success",
-      anc.length > 0
-        ? `已恢复(并一并恢复其所属 ${anc.map((a) => a.name).join(" / ")})`
-        : "已恢复",
+      t.trash.toastRestored(anc.map((a) => a.name).join(" / ")),
     );
     return true;
   },
@@ -211,7 +206,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       return false;
     }
     await get().loadTrash();
-    useUiStore.getState().showToast("success", "已彻底删除");
+    useUiStore.getState().showToast("success", t.trash.toastPurged);
     return true;
   },
 
@@ -222,7 +217,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       return false;
     }
     await get().loadTrash();
-    useUiStore.getState().showToast("success", "回收站已清空");
+    useUiStore.getState().showToast("success", t.trash.toastEmptied);
     return true;
   },
 }));
@@ -254,7 +249,20 @@ export const useSelectionStore = create<SelectionState>((set) => ({
   hiddenCurves: null,
   selectedPeakIndex: null,
   selectDataset: (sampleId, datasetId) =>
-    set({ sampleId, datasetId, selectedPeakIndex: null, cellId: null }),
+    set(() => {
+      // 样本归属自动补全:趋势图点数据点、导入"打开已有"这类旁路只带
+      // datasetId。丢掉 sampleId 会让 Inspector 的材料档案/预设拉不到
+      // (profileProjectId 依赖 sample),整段功能无声失效。
+      let sid = sampleId;
+      if (sid == null && datasetId != null) {
+        sid =
+          useProjectStore
+            .getState()
+            .samples.find((s) => s.datasets.some((d) => d.id === datasetId))
+            ?.id ?? null;
+      }
+      return { sampleId: sid, datasetId, selectedPeakIndex: null, cellId: null };
+    }),
   selectCell: (sampleId, cellId) =>
     set({ sampleId, cellId, datasetId: null, selectedPeakIndex: null, hiddenCurves: null }),
   toggleCurve: (key) =>
@@ -600,6 +608,12 @@ export const useAnalysisStore = create<AnalysisState>((set, get) => ({
   },
 
   clearDataset: () => {
+    const s = get();
+    // 与 loadDataset 同样清理:不关掉在途 preview/commit 定时器、不递增
+    // _previewSeq,删完数据集后残留请求会把曲线写回 UI(数据"复活"),
+    // commit 定时器还会对已删 dataset 发保存请求。
+    if (s._commitTimer) window.clearTimeout(s._commitTimer);
+    if (s._previewTimer) window.clearTimeout(s._previewTimer);
     set({
       curve: null,
       peaks: [],
@@ -612,6 +626,9 @@ export const useAnalysisStore = create<AnalysisState>((set, get) => ({
       smoothingAffectsMetrics: false,
       undoStack: [],
       redoStack: [],
+      _previewSeq: s._previewSeq + 1,
+      _commitTimer: null,
+      _previewTimer: null,
     });
     usePlotStore.getState().setXDomain(null);
     usePlotStore.getState().setZoom(null);
@@ -622,13 +639,16 @@ export const useAnalysisStore = create<AnalysisState>((set, get) => ({
   detectPeaks: async () => {
     const dsId = get().loadedDatasetId;
     if (dsId == null || get().detecting) return;
+    // 参数快照:await 期间用户可能切到别的数据集,不能把切走后的
+    // get().pipeline(已经是新数据集的参数)commit 到旧数据集头上
+    const pipeline = get().pipeline;
     set({ detecting: true });
     try {
       // Detect Peaks 是「固化」动作:先把当前参数落库(commit),再让
       // 引擎按落库的参数正式跑一遍寻峰、写进 peaks 表。
       await engineCommand("analysis.commit", {
         dataset_id: dsId,
-        pipeline: get().pipeline,
+        pipeline,
       });
       const r = await engineCommand<{ peaks: PeakResult[] }>("peaks.detect", {
         dataset_id: dsId,
@@ -689,6 +709,7 @@ export const useAnalysisStore = create<AnalysisState>((set, get) => ({
   patchPipeline: (patch) => {
     const s = get();
     const next = { ...clone(s.pipeline), ...patch };
+    const dsId = s.loadedDatasetId;
     // Undo 帧合并(400ms):同一次拖动产生的连续 patch 只压一帧。
     // 首帧总是入栈(_lastUndoAt=0),之后窗口内的 patch 不再入栈 ——
     // 一次 Ctrl+Z 就能回到这次拖动开始前的状态。
@@ -696,7 +717,10 @@ export const useAnalysisStore = create<AnalysisState>((set, get) => ({
     const coalesce = now - s._lastUndoAt < 400;
     set((st) => ({
       pipeline: next,
-      status: "previewing",
+      // 无数据集时不置 previewing —— 后面没有通路会把它拉回 idle,
+      // StatusBar 会永久卡在"计算中"(undo 栈仍记录,切换数据集前的
+      // 参数编辑是合法操作,只是无处可算)
+      status: dsId != null ? "previewing" : st.status,
       // 参数变了 → 内存里的峰已不是固化过的那批
       peaksDirty: true,
       undoStack: coalesce
@@ -714,7 +738,6 @@ export const useAnalysisStore = create<AnalysisState>((set, get) => ({
     // 引擎类参数:节流发送,乱序丢弃。拖动中 compute_peak_metrics=false
     // —— 跳过 FWHM/Area(它们是拖动延迟的主要来源之一),只保曲线跟手;
     // commit 前的收尾 preview 再传 true 把度量补全。
-    const dsId = s.loadedDatasetId;
     if (dsId != null) {
       const previewTimer = window.setTimeout(async () => {
         if (seq !== get()._previewSeq) return; // cancel 语义
@@ -754,7 +777,7 @@ export const useAnalysisStore = create<AnalysisState>((set, get) => ({
           set({ status: "committing" });
           // 收尾 preview:把拖动中跳过的 FWHM/Area 补回来,再落库。
           // 不补的话峰表会在拖动后一直显示 "—",直到下次「检测峰」。
-          const finalSeq = get()._previewSeq;
+          const commitSeq = get()._previewSeq;
           const fin = await engineCommand<PreviewResult>("analysis.preview", {
             dataset_id: dsId,
             pipeline: get().pipeline,
@@ -763,18 +786,31 @@ export const useAnalysisStore = create<AnalysisState>((set, get) => ({
             restoreAnnotation: true,
             compute_peak_metrics: true,
           });
-          if (finalSeq === get()._previewSeq && fin.ok) {
-            set({
-              curve: fin.data.curve,
-              peaks: fin.data.peaks,
-              smoothingAffectsMetrics: fin.data.smoothingAffectsMetrics,
-            });
+          if (commitSeq === get()._previewSeq) {
+            if (fin.ok) {
+              set({
+                curve: fin.data.curve,
+                peaks: fin.data.peaks,
+                smoothingAffectsMetrics: fin.data.smoothingAffectsMetrics,
+              });
+            } else {
+              // 收尾失败不能静默:峰表会停在 compute_peak_metrics=false
+              // 的空 FWHM/Area,而状态显示"已保存"
+              useUiStore.getState().showToast("error", fin.error);
+            }
           }
-          await engineCommand("analysis.commit", {
+          const commitR = await engineCommand("analysis.commit", {
             dataset_id: dsId,
             pipeline: get().pipeline,
           });
-          set({ status: "idle" });
+          if (!commitR.ok) {
+            useUiStore.getState().showToast("error", commitR.error);
+          }
+          // 只有这轮 seq 还没被新 patch 顶掉才收状态;否则新一轮 preview
+          // 在途,状态归它管 —— 无条件置 idle 会让"拖动中 commit"显示假"已保存"
+          if (commitSeq === get()._previewSeq) {
+            set({ status: "idle" });
+          }
         }
       }, 300),
     });
@@ -793,7 +829,8 @@ export const useAnalysisStore = create<AnalysisState>((set, get) => ({
       undoStack: st.undoStack.slice(0, -1),
       redoStack: [...st.redoStack, st.pipeline],
       peaksDirty: true,
-      status: "previewing",
+      // 无数据集不置 previewing(没有通路拉回 idle,状态会永久卡住)
+      status: s.loadedDatasetId != null ? "previewing" : st.status,
       _commitTimer: null,
       _previewTimer: null,
       // undo 后立即再调参应开新帧,不与刚结束的拖动窗口合并
@@ -847,7 +884,7 @@ export const useAnalysisStore = create<AnalysisState>((set, get) => ({
       redoStack: st.redoStack.slice(0, -1),
       undoStack: [...st.undoStack, st.pipeline],
       peaksDirty: true,
-      status: "previewing",
+      status: s.loadedDatasetId != null ? "previewing" : st.status,
       _commitTimer: null,
       _previewTimer: null,
       _lastUndoAt: 0,

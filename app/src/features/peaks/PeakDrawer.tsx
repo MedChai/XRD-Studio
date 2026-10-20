@@ -14,13 +14,11 @@ import type { PeakResult } from "../../types/engine";
 
 /** 晶面单元格的悬停提示:把归属依据摊开,用户可核对而不必信标签。 */
 function hklTooltip(p: PeakResult): string {
+  const cand = (c: { label: string | null; dominance?: number | null }) =>
+    `${c.label ?? "—"}(${c.dominance != null ? (c.dominance * 100).toFixed(0) + "%" : "—"})`;
   if (p.hkl_confidence === "ambiguous") {
-    const alts = (p.hkl_candidates ?? [])
-      .map((c) => `${c.label}(${c.dominance != null ? (c.dominance * 100).toFixed(0) + "%" : "—"})`)
-      .join(" / ");
-    return alts
-      ? `双峰未分开,候选:${alts}`
-      : "双峰未分开,无法唯一归属";
+    const alts = (p.hkl_candidates ?? []).map(cand).join(" / ");
+    return alts ? t.peaks.hkl.ambiguousAlts(alts) : t.peaks.hkl.ambiguous;
   }
   if (!p.hkl) {
     // dominance 在 none 时是"最强的那个反射也只占这么多" —— 低于阈值
@@ -32,20 +30,14 @@ function hklTooltip(p: PeakResult): string {
       .map((c) => c.label)
       .filter(Boolean)
       .join(" / ");
-    const base = weak
-      ? `该 2θ 处没有占主导的 R-3m 允许反射 —— 近邻弱匹配:${weak}(疑似杂相或未建模峰)`
-      : "该 2θ 附近没有本物相(R-3m)的允许反射,可能是杂相或未建模的峰";
+    const base = weak ? t.peaks.hkl.noneWeak(weak) : t.peaks.hkl.none;
     return share != null && share > 0
-      ? `${base}(最强也仅占 ${(share * 100).toFixed(0)}%)`
+      ? t.peaks.hkl.noneShare(base, (share * 100).toFixed(0))
       : base;
   }
-  const parts = [`归属依据:该反射贡献 ${((p.dominance ?? 0) * 100).toFixed(0)}%`];
+  const parts = [t.peaks.hkl.dominance(((p.dominance ?? 0) * 100).toFixed(0))];
   if (p.hkl_candidates && p.hkl_candidates.length > 1) {
-    const others = p.hkl_candidates
-      .slice(1)
-      .map((c) => `${c.label}(${c.dominance != null ? (c.dominance * 100).toFixed(0) + "%" : "—"})`)
-      .join(" / ");
-    parts.push(`附近还有:${others}`);
+    parts.push(t.peaks.hkl.others(p.hkl_candidates.slice(1).map(cand).join(" / ")));
   }
   return parts.join(";");
 }

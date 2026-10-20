@@ -228,6 +228,8 @@ function fakePeaks(curve: CurvePayload, sensitivity: string): PeakResult[] {  co
 }
 
 const SAMPLES = ["LFP-500C", "LFP-450C", "LFP-400C", "NCM811-03"];
+/** samples.create 的自增 id(模拟 DB 主键)。 */
+let mockSampleSeq = 100;
 
 /** mock 的 R-3m 允许反射表(消光 -h+k+l ≡ 0 mod 3)。
  *
@@ -257,6 +259,44 @@ function nearestAllowed(position: number): { label: string; t2: number } | null 
   return best;
 }
 
+/** mock 晶面归属:与引擎同为三态 reliable/ambiguous/none。
+ *
+ * 双峰物理上未分开时必须报 ambiguous 并给候选 —— 只给 nearest 的两态
+ * 会让浏览器开发模式验证不到「未分开」的斜体/候选列表 UI。
+ * 判据:两个允许反射都在邻域内且间距 < 0.45°(如 (006)/(102) 间距 0.36°)。 */
+function annotateMock(position: number): {
+  hkl: string | null;
+  hkl_confidence: "reliable" | "ambiguous" | "none";
+  dominance: number | null;
+  hkl_candidates: HklCandidate[];
+} {
+  const within = MOCK_REFLECTIONS.filter((r) => Math.abs(position - r.t2) <= 0.22).sort(
+    (a, b) => Math.abs(position - a.t2) - Math.abs(position - b.t2),
+  );
+  const cand = (r: { label: string; t2: number }, dom: number | null): HklCandidate => ({
+    hkl: null,
+    label: r.label,
+    position: r.t2,
+    dominance: dom,
+  });
+  if (within.length >= 2 && within[1].t2 - within[0].t2 < 0.45) {
+    const share = 0.5;
+    return {
+      hkl: null,
+      hkl_confidence: "ambiguous",
+      dominance: share,
+      hkl_candidates: within.slice(0, 2).map((r) => cand(r, share)),
+    };
+  }
+  const best = nearestAllowed(position);
+  return {
+    hkl: best?.label ?? null,
+    hkl_confidence: best ? "reliable" : "none",
+    dominance: best ? 1 : null,
+    hkl_candidates: best ? [cand(best, 1)] : [],
+  };
+}
+
 const MOCK_ANNOTATION = {
   phase: "R-3m 层状",
   a: 2.878,
@@ -279,6 +319,10 @@ function hashPipeline(p: unknown): string {
 /** 模拟 analyses.annotation_json:按 dataset 存标注快照(context+labels+hash)。
  *  与引擎同语义:打开图读回、commit 不删、annotate 覆盖。 */
 const mockAnnotations = new Map<number, AnnotationContext>();
+/** 模拟 peaks 表的固化状态:detect 写入、pipeline 变化的 commit 删除。
+ *  与引擎一致 —— 只改 mockPipeline 不清这个的话,浏览器模式下改参数→
+ *  commit→重开仍报 peaksStored:true,验证到真机不存在的假行为。 */
+const mockStoredPeaks = new Set<number>();
 /** mock 当前分析的 pipeline(preview/commit 时更新,annotate 时取指纹)。 */
 let mockPipeline: Record<string, unknown> = {};
 /** 预设列表(按项目过滤),与 analysis_presets 表同构。 */
@@ -506,9 +550,11 @@ async function mockCommand(
       // 把 annotation_json 的 labels 快照按位置合回(不重算)。
       if (doAnnotate) {
         for (const p of peaks) {
-          const ref = nearestAllowed(p.position);
-          p.hkl = ref?.label ?? null;
-          p.hkl_confidence = ref ? "reliable" : "none";
+          const a = annotateMock(p.position);
+          p.hkl = a.hkl;
+          p.hkl_confidence = a.hkl_confidence;
+          p.dominance = a.dominance;
+          p.hkl_candidates = a.hkl_candidates;
         }
       } else if (restore) {
         peaks = mergeMockLabels(peaks, mockAnnotations.get(dsId));
@@ -538,7 +584,7 @@ async function mockCommand(
         pipeline: {},
         curve: mockCurveCache,
         peaks,
-        peaksStored: stored != null,
+        peaksStored: mockStoredPeaks.has(dsId),
         smoothingAffectsMetrics: false,
         warnings: [],
         annotation: stored ?? null,
@@ -550,16 +596,18 @@ async function mockCommand(
       const dsId = Number(payload.dataset_id ?? 1);
       const peaks = fakePeaks(mockCurveCache, "medium");
       for (const p of peaks) {
-        const ref = nearestAllowed(p.position);
-        p.hkl = ref?.label ?? null;
-        p.hkl_confidence = ref ? "reliable" : "none";
+        const a = annotateMock(p.position);
+        p.hkl = a.hkl;
+        p.hkl_confidence = a.hkl_confidence;
+        p.dominance = a.dominance;
+        p.hkl_candidates = a.hkl_candidates;
       }
       const labels = peaks.map((p) => ({
         position: p.position,
         hkl: p.hkl ?? null,
         hklConfidence: p.hkl_confidence ?? null,
-        dominance: p.hkl == null ? null : 1,
-        candidates: [] as HklCandidate[],
+        dominance: p.dominance ?? null,
+        candidates: (p.hkl_candidates ?? []) as HklCandidate[],
       }));
       mockAnnotations.set(dsId, {
         ...MOCK_ANNOTATION,
@@ -567,6 +615,7 @@ async function mockCommand(
         annotatedAt: new Date().toISOString(),
         labels,
       });
+      mockStoredPeaks.add(dsId);
       return ok({
         peaks,
         annotation: mockAnnotations.get(dsId),
@@ -576,22 +625,19 @@ async function mockCommand(
       if (!mockCurveCache) mockCurveCache = fakeLfpCurve();
       const dsId = Number(payload.dataset_id ?? 1);
       const peaks = fakePeaks(mockCurveCache, "medium");
-      // 与引擎的 annotate_high_ni 同口径:按 R-3m 允许反射表归属。
-      // 双峰显示名用文献 (102)/(108),与引擎 _LITERATURE_HKL 一致。
+      // 与引擎的 annotate_high_ni 同口径:按 R-3m 允许反射表归属(三态)。
+      // 归属依据也要给:引擎返回 dominance / candidates,前端峰表 tooltip
+      // 靠它显示"该反射贡献 X%"。mock 缺这两个字段会让浏览器开发模式
+      // 下 tooltip 恒显示 0%,与真实引擎行为不符。
       const annotated = peaks.map((p) => {
-        const ref = nearestAllowed(p.position);
-        // 归属依据也要给:引擎返回 dominance / candidates,前端峰表 tooltip
-        // 靠它显示"该反射贡献 X%"。mock 缺这两个字段会让浏览器开发模式
-        // 下 tooltip 恒显示 0%,与真实引擎行为不符。
+        const a = annotateMock(p.position);
         return {
           index: p.index,
           position: p.position,
-          hkl_label: ref?.label ?? null,
-          hkl_confidence: ref ? ("reliable" as const) : ("none" as const),
-          dominance: ref ? 1 : null,
-          candidates: ref
-            ? [{ hkl: null, label: ref.label, position: ref.t2, dominance: 1 }]
-            : [],
+          hkl_label: a.hkl,
+          hkl_confidence: a.hkl_confidence,
+          dominance: a.dominance,
+          candidates: a.hkl_candidates,
         };
       });
       // 与引擎一致:annotate = 权威刷新,覆盖 annotation_json 快照。
@@ -616,7 +662,12 @@ async function mockCommand(
       });
     }
     case "analysis.commit": {
-      mockPipeline = (payload.pipeline ?? {}) as Record<string, unknown>;
+      const next = (payload.pipeline ?? {}) as Record<string, unknown>;
+      // 与引擎一致:参数变化的 commit 删 peaks 行(annotation 保留)
+      if (hashPipeline(next) !== hashPipeline(mockPipeline)) {
+        mockStoredPeaks.delete(Number(payload.dataset_id ?? 1));
+      }
+      mockPipeline = next;
       return ok({ analysisId: 1 });
     }
     case "profiles.list":
@@ -909,6 +960,20 @@ async function mockCommand(
       if (i < 0) return fail("只能彻底删除回收站中的对象");
       mockTrash.splice(i, 1);
       return ok({ id, kind: table, removedFiles: 1 });
+    }
+    case "samples.create": {
+      // 与引擎同口径:名称必填、波长可校验。此前 mock 缺这条,
+      // 浏览器开发模式「新建实验」必失败(CLAUDE.md §2:加了引擎命令必须同步 mock)
+      const name = String(payload.name ?? "").trim();
+      if (!name) return fail("实验名称不能为空");
+      if (payload.wavelength != null) {
+        const lam = Number(payload.wavelength);
+        if (!Number.isFinite(lam) || lam < 0.3 || lam > 3.0) {
+          return fail("波长超出合理范围(0.3–3.0 Å)");
+        }
+      }
+      mockSampleSeq += 1;
+      return ok({ sampleId: mockSampleSeq });
     }
     case "samples.update": {
       // 与引擎同口径:只更新给出的字段;波长校验 0.3–3.0。
