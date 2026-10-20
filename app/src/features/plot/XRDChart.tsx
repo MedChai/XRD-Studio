@@ -19,6 +19,14 @@ import {
   usePlotStore,
   useSelectionStore,
 } from "../../stores";
+import {
+  axisLabel,
+  formatAxisReadout,
+  formatAxisValue,
+  fromDisplayX,
+  toDisplayX,
+  type XDisplay,
+} from "../../services/coords";
 
 interface Props {
   onPeakClick?: (index: number) => void;
@@ -30,6 +38,25 @@ function cssVar(name: string): string {
 
 /** 背景曲线的 series 名。tooltip 与点击命中都要靠它区分主曲线与背景线。 */
 const BG_SERIES = "__background__";
+
+/** 当前曲线的显示映射参数。
+ *
+ * 放模块级供挂载时注册的事件回调使用:那些回调只在 mount 跑一次,捕获
+ * 渲染闭包里的 view/wavelength 会永远拿到首帧的值(切换视图后缩放写回
+ * 就会错位)。从 store 现取才总是当前的。 */
+function currentConv(): {
+  view: XDisplay;
+  nativeAxis: "two_theta" | "d" | "q" | "generic";
+  wavelength: number;
+} {
+  const cur = useAnalysisStore.getState().curve;
+  const { xView } = usePlotStore.getState();
+  return {
+    view: cur && cur.xAxisType === "generic" ? "generic" : xView,
+    nativeAxis: cur?.xAxisType ?? "two_theta",
+    wavelength: cur?.wavelength ?? 1.5418,
+  };
+}
 
 function XRDChartInner({ onPeakClick }: Props) {
   const ref = useRef<HTMLDivElement>(null);
@@ -51,6 +78,14 @@ function XRDChartInner({ onPeakClick }: Props) {
   const showBackground = usePlotStore((s) => s.showBackground);
   const zoom = usePlotStore((s) => s.zoom);
   const compareCurves = usePlotStore((s) => s.compareCurves);
+  const xView = usePlotStore((s) => s.xView);
+
+  /** 显示层坐标映射(§4.1):xView 是用户选的视图,generic 采集轴无换算
+   *  定义,强制原样显示。zoom/xDomain/峰位始终是采集轴,只有画上图的 x
+   *  过 toDisplayX —— 峰表结果按采集轴存储,换算只影响显示。 */
+  const view: XDisplay = curve && curve.xAxisType === "generic" ? "generic" : xView;
+  const nativeAxis = curve?.xAxisType ?? "two_theta";
+  const wavelength = curve?.wavelength ?? 1.5418;
 
   /** 归一化到 100 的 y 标度。曲线、背景线、峰标记三者必须用**同一个**
    * maxY,否则一拖 Offset 滑块它们就互相错位。 */
@@ -71,10 +106,10 @@ function XRDChartInner({ onPeakClick }: Props) {
     const { x, y } = curve;
     const out: [number, number][] = new Array(x.length);
     for (let i = 0; i < x.length; i++) {
-      out[i] = [x[i], (y[i] / maxY) * 100 + offset + mainShift];
+      out[i] = [toDisplayX(x[i], view, nativeAxis, wavelength), (y[i] / maxY) * 100 + offset + mainShift];
     }
     return out;
-  }, [curve, offset, maxY, mainShift]);
+  }, [curve, offset, maxY, mainShift, view, nativeAxis, wavelength]);
 
   /** 背景曲线(§7.3 Show Background)。引擎只在 background.enabled 时
    * 才返回它,所以关闭背景扣除后这个开关是无效的 —— Inspector 会提示。 */
@@ -84,10 +119,10 @@ function XRDChartInner({ onPeakClick }: Props) {
     if (background.length !== x.length) return null;
     const out: [number, number][] = new Array(x.length);
     for (let i = 0; i < x.length; i++) {
-      out[i] = [x[i], (background[i] / maxY) * 100 + offset + mainShift];
+      out[i] = [toDisplayX(x[i], view, nativeAxis, wavelength), (background[i] / maxY) * 100 + offset + mainShift];
     }
     return out;
-  }, [curve, offset, maxY, mainShift]);
+  }, [curve, offset, maxY, mainShift, view, nativeAxis, wavelength]);
 
   /** 对比曲线(§S4)。每条**用各自的 maxY 归一化**到同一个 0–100 标度 ——
    * 若共用当前曲线的 maxY,强度差 10 倍的样品在图上看起来一样高,叠加就
@@ -101,53 +136,64 @@ function XRDChartInner({ onPeakClick }: Props) {
       const peakY = c.curve.y.reduce((m, v) => (v > m ? v : m), 0) || 1;
       const shift = mode === "stacked" ? compareCurves.indexOf(c) * 55 : 0;
       const data: [number, number][] = new Array(c.curve.x.length);
+      // 每条对比曲线用**自己的**采集轴/波长换算到同一显示视图 —— 不同靶
+      // 的 λ 不同,共用当前曲线的 λ 会让 d/Q 对齐整体错位。
       for (let i = 0; i < c.curve.x.length; i++) {
-        data[i] = [c.curve.x[i], (c.curve.y[i] / peakY) * 100 + shift];
+        data[i] = [
+          toDisplayX(c.curve.x[i], view, c.curve.xAxisType, c.curve.wavelength),
+          (c.curve.y[i] / peakY) * 100 + shift,
+        ];
       }
       return { id: c.datasetId, name: c.name, color: c.color, data };
     });
-  }, [compareCurves, mode]);
+  }, [compareCurves, mode, view]);
 
   const markData = useMemo(() => {
     if (!curve || !showLabels || peaks.length === 0) return undefined;
-    return peaks.map((p: PeakResult) => ({
-      name: String(p.index),
-      // offset 必须与 seriesData 一致:否则拖 Display 的 Offset 滑块时
-      // 曲线上下移动而圆点/标签原地不动,视觉上就是一堆悬空的点
-      coord: [p.position, (p.intensity / maxY) * 100 + offset + mainShift],
-      // 有晶面标注优先显示晶面,否则退回 2θ
-      value: p.hkl ?? p.position.toFixed(2) + "°",
-      itemStyle: {
-        color:
-          selectedPeak === p.index ? cssVar("--accent") : "transparent",
-      },
-      label: {
-        show: true,
-        formatter: () => p.hkl ?? p.position.toFixed(2) + "°",
-        // 恒在点上方。**不要**对贴顶峰改 bottom —— 标签会落在曲线
-        // 上,峰线直接穿过数字。顶部裁切靠 yAxis.max 预留余量解决。
-        position: "top" as const,
-        distance: 6,
-        fontSize: 10,
-        // 三态必须**视觉可辨**:reliable 用常规色,ambiguous 用弱化色 +
-        // 括号外的问号,未归属用更弱的色。旧实现里三者都是同一个
-        // --text-secondary,用户无法区分"这是 (102)"与"这可能是 (006)
-        // 或 (102),没分开"。把不确定性画出来,比给一个假确定更有用。
-        color:
-          selectedPeak === p.index
-            ? cssVar("--accent")
-            : p.hkl_confidence === "ambiguous"
-              ? cssVar("--warning")
-              : p.hkl
-                ? cssVar("--text-secondary")
-                : cssVar("--text-tertiary"),
-        fontStyle:
-          p.hkl_confidence === "ambiguous" ? ("italic" as const) : undefined,
-      },
-      symbol: "circle",
-      symbolSize: selectedPeak === p.index ? 7 : 4,
-    }));
-  }, [curve, peaks, showLabels, selectedPeak, offset, maxY, mainShift]);
+    return peaks.map((p: PeakResult) => {
+      // 峰位存的是采集轴,标到显示视图上要换算;无晶面标注时标签退回
+      // 峰位读数,单位随视图(2θ/d/Q),不能写死 "°"。
+      const xDisp = toDisplayX(p.position, view, nativeAxis, wavelength);
+      const fallbackLabel = formatAxisValue(xDisp, view);
+      return {
+        name: String(p.index),
+        // offset 必须与 seriesData 一致:否则拖 Display 的 Offset 滑块时
+        // 曲线上下移动而圆点/标签原地不动,视觉上就是一堆悬空的点
+        coord: [xDisp, (p.intensity / maxY) * 100 + offset + mainShift],
+        // 有晶面标注优先显示晶面,否则退回峰位读数
+        value: p.hkl ?? fallbackLabel,
+        itemStyle: {
+          color:
+            selectedPeak === p.index ? cssVar("--accent") : "transparent",
+        },
+        label: {
+          show: true,
+          formatter: () => p.hkl ?? fallbackLabel,
+          // 恒在点上方。**不要**对贴顶峰改 bottom —— 标签会落在曲线
+          // 上,峰线直接穿过数字。顶部裁切靠 yAxis.max 预留余量解决。
+          position: "top" as const,
+          distance: 6,
+          fontSize: 10,
+          // 三态必须**视觉可辨**:reliable 用常规色,ambiguous 用弱化色 +
+          // 括号外的问号,未归属用更弱的色。旧实现里三者都是同一个
+          // --text-secondary,用户无法区分"这是 (102)"与"这可能是 (006)
+          // 或 (102),没分开"。把不确定性画出来,比给一个假确定更有用。
+          color:
+            selectedPeak === p.index
+              ? cssVar("--accent")
+              : p.hkl_confidence === "ambiguous"
+                ? cssVar("--warning")
+                : p.hkl
+                  ? cssVar("--text-secondary")
+                  : cssVar("--text-tertiary"),
+          fontStyle:
+            p.hkl_confidence === "ambiguous" ? ("italic" as const) : undefined,
+        },
+        symbol: "circle",
+        symbolSize: selectedPeak === p.index ? 7 : 4,
+      };
+    });
+  }, [curve, peaks, showLabels, selectedPeak, offset, maxY, mainShift, view, nativeAxis, wavelength]);
 
   useEffect(() => {
     if (!ref.current) return;
@@ -199,11 +245,15 @@ function XRDChartInner({ onPeakClick }: Props) {
         return;
       }
 
-      // ② 点在曲线上:按 x 就近匹配峰位
+      // ② 点在曲线上:按 x 就近匹配峰位。
+      //    图上的 x 是显示坐标,峰位存的是采集轴(§4.1)—— 先换回采集轴
+      //    再比,否则切到 d/Q 视图后点曲线永远匹配不上(d 值个位数 vs
+      //    2θ 十位数,容差 1.0 直接失效)。
       if (params.componentType !== "series") return;
       if (params.seriesName === BG_SERIES) return; // 背景线不参与选峰
       if (!Array.isArray(params.value)) return;
-      const xClick = params.value[0] as number;
+      const { view: v, nativeAxis: nat, wavelength: lam } = currentConv();
+      const xClick = fromDisplayX(params.value[0] as number, v, nat, lam);
       let best = -1;
       let bestD = Infinity;
       for (const p of current) {
@@ -247,8 +297,15 @@ function XRDChartInner({ onPeakClick }: Props) {
         };
         const dz = opt.dataZoom?.[0];
         if (dz?.startValue == null || dz?.endValue == null) return;
-        const next = { from: dz.startValue, to: dz.endValue };
-        appliedZoom.current = JSON.stringify(next); // 标记为本图自己产生的
+        // dataZoom 的 start/end 是显示坐标;zoom 持采集轴(§4.1),换回再
+        // 写 store。key 与 zoom 回放 effect 同构(view 前缀),否则切换视图
+        // 后同值短路会失效/误触发。
+        const { view: v, nativeAxis: nat, wavelength: lam } = currentConv();
+        const next = {
+          from: fromDisplayX(dz.startValue, v, nat, lam),
+          to: fromDisplayX(dz.endValue, v, nat, lam),
+        };
+        appliedZoom.current = `${v}:${JSON.stringify(next)}`; // 标记为本图自己产生的
         usePlotStore.getState().setZoom(next);
       });
     };
@@ -295,7 +352,8 @@ function XRDChartInner({ onPeakClick }: Props) {
               borderWidth: 1,
               formatter: (p: { value: number | number[] }) => {
                 const v = Array.isArray(p.value) ? p.value : p.value;
-                return typeof v === "number" ? v.toFixed(3) : String(v);
+                // 显示坐标读数,精度/单位随视图(§4.4)
+                return typeof v === "number" ? formatAxisValue(v, view) : String(v);
               },
             },
           },
@@ -308,7 +366,8 @@ function XRDChartInner({ onPeakClick }: Props) {
             const main = ps.find((p) => p.seriesName !== BG_SERIES) ?? ps[0];
             const v = main?.value;
             if (!v) return "";
-            return `<span class=tabular>2θ ${v[0].toFixed(3)}°</span><br/>` +
+            // 与状态栏同一条格式(formatAxisReadout),两处读数必须一致
+            return `<span class=tabular>${formatAxisReadout(v[0], view)}</span><br/>` +
               `<span class=tabular>I ${Math.round(v[1]).toLocaleString()}</span>`;
           },
         },
@@ -316,13 +375,20 @@ function XRDChartInner({ onPeakClick }: Props) {
           type: "value",
           // x 值域必须从数据推导。此前硬编码 min:10/max:80,任何不在
           // 10–80° 的实测谱都会被裁掉,而且 Fit All 也无从谈起。
-          min: xDomain ? xDomain[0] : undefined,
-          max: xDomain ? xDomain[1] : undefined,
+          // 换算到显示坐标后仍单调,from/to 直接映射到 min/max。
+          min: xDomain ? toDisplayX(xDomain[0], view, nativeAxis, wavelength) : undefined,
+          max: xDomain ? toDisplayX(xDomain[1], view, nativeAxis, wavelength) : undefined,
           axisLine: { lineStyle: { color: cssVar("--plot-axis") } },
           axisTick: { show: false },
           splitLine: { show: false },
-          axisLabel: { color: cssVar("--text-secondary"), fontSize: 10 },
-          name: "2θ (°)",
+          axisLabel: {
+            color: cssVar("--text-secondary"),
+            fontSize: 10,
+            // d 视图内部映射是负 d(见 services/coords.ts 头注),刻度取
+            // 绝对值 —— 用户看到的与文献图一致(大 d 在左)。
+            formatter: view === "d" ? (value: number) => Math.abs(value).toFixed(2) : undefined,
+          },
+          name: axisLabel(view),
           nameLocation: "end",
           nameGap: 8,
           nameTextStyle: { color: cssVar("--text-tertiary"), fontSize: 10 },
@@ -429,24 +495,26 @@ function XRDChartInner({ onPeakClick }: Props) {
     // setXDomain/setZoom(null) 让 xDomain 引用变了却仍是相同数值,
     // 看起来就像"切换数据集后缩放窗口残留"。
     // 依赖 curve 本身(对象引用每次 loadDataset 都是新的)才能真正重绘。
-  }, [curve, seriesData, bgData, markData, crosshair, mode, peaks, selectPeak, onPeakClick, showBackground, xDomain, compareSeries]);
+  }, [curve, seriesData, bgData, markData, crosshair, mode, peaks, selectPeak, onPeakClick, showBackground, xDomain, compareSeries, view, nativeAxis, wavelength]);
 
-  // 把 plotStore.zoom 回放到图上。
+  // 把 plotStore.zoom(采集轴)换算成显示坐标后回放到图上。
   // 值相等短路:本图自己产生的 zoom 已经 appliedZoom 标记过,不必再回放,
-  // 也避免 dispatchAction → 重渲染 → 再进这里。
+  // 也避免 dispatchAction → 重渲染 → 再进这里。key 带 view 前缀 ——
+  // 切换视图时同一个采集轴窗口要映射到新的显示坐标重放,只比 {from,to}
+  // 会被短路掉,缩放窗口残留旧视图的坐标值。
   useEffect(() => {
     const chart = chartRef.current;
     if (!chart || !xDomain) return;
     const target = zoom ?? { from: xDomain[0], to: xDomain[1] };
-    const key = JSON.stringify(target);
+    const key = `${view}:${JSON.stringify(target)}`;
     if (key === appliedZoom.current) return;
     appliedZoom.current = key;
     chart.dispatchAction({
       type: "dataZoom",
-      startValue: target.from,
-      endValue: target.to,
+      startValue: toDisplayX(target.from, view, nativeAxis, wavelength),
+      endValue: toDisplayX(target.to, view, nativeAxis, wavelength),
     });
-  }, [zoom, xDomain]);
+  }, [zoom, xDomain, view, nativeAxis, wavelength]);
 
   // 选中峰变化:平移视口到峰附近并高亮(§35)。
   // 走 setZoom(数据坐标)而不是直接 dispatchAction,这样底部范围框同步跟随。

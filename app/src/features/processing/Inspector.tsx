@@ -18,6 +18,7 @@ import {
   useUiStore,
 } from "../../stores";
 import { engineCommand } from "../../services/engine";
+import type { XView } from "../../services/coords";
 import type {
   AnalysisPreset,
   HighNiResult,
@@ -58,6 +59,9 @@ export function Inspector() {
   const setShowLabels = usePlotStore((s) => s.setShowLabels);
   const showBackground = usePlotStore((s) => s.showBackground);
   const setShowBackground = usePlotStore((s) => s.setShowBackground);
+  // 横轴视图(§4.1):纯显示层,峰表/zoom 仍按采集轴
+  const xView = usePlotStore((s) => s.xView);
+  const setXView = usePlotStore((s) => s.setXView);
   const xDomain = usePlotStore((s) => s.xDomain);
   const zoom = usePlotStore((s) => s.zoom);
   const [advanced, setAdvanced] = useState(false);
@@ -813,6 +817,30 @@ export function Inspector() {
       {/* ---------------- DISPLAY ---------------- */}
       <section className="border-t border-[var(--divider)] pt-1">
         <SectionHeader>{t.inspector.display}</SectionHeader>
+        {/* 横轴视图(§4.1):只换图上的 x 映射,峰表仍按采集轴存储。
+            generic 采集轴无换算定义,给说明而不是一个点不动的开关。 */}
+        <Row label={t.inspector.xAxisView}>
+          {curve && curve.xAxisType === "generic" ? (
+            <span
+              className="text-[12px] text-[var(--text-tertiary)]"
+              title={t.inspector.xAxisViewHint}
+            >
+              {t.inspector.xAxisGeneric}
+            </span>
+          ) : (
+            <span title={t.inspector.xAxisViewHint}>
+              <Segmented
+                options={[
+                  { value: "two_theta", label: t.inspector.xAxisTwoTheta },
+                  { value: "d", label: t.inspector.xAxisD },
+                  { value: "q", label: t.inspector.xAxisQ },
+                ]}
+                value={xView}
+                onChange={(v) => setXView(v as XView)}
+              />
+            </span>
+          )}
+        </Row>
         <Row label={t.inspector.normalization}>
           <span className="text-[12px] text-[var(--text-tertiary)]">
             {t.inspector.normalizationValue}

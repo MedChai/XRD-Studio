@@ -1,11 +1,15 @@
 /** 状态栏(§15):光标读数、点数、保存状态。
  *
- *  电化学模式(cellId 非空)整栏换成模式标签:2θ 光标、XRD 点数/
+ *  电化学模式(cellId 非空)整栏换成模式标签:光标、XRD 点数/
  *  峰固化徽标、谱图管线状态全是谱图语境,selectCell 不清 analysisStore,
  *  留着会显示上一张谱图的残值,只会误导。
+ *
+ *  光标 x 存的是**显示坐标**(与图上轴一致),读数格式与图表 tooltip
+ *  共用 formatAxisReadout —— 两处显示不同读数会让人怀疑哪个是真的。
  */
 
 import { useAnalysisStore, usePlotStore, useSelectionStore } from "../stores";
+import { formatAxisReadout, type XDisplay } from "../services/coords";
 import { t } from "../i18n";
 
 export function StatusBar() {
@@ -14,7 +18,9 @@ export function StatusBar() {
   const peaksDirty = useAnalysisStore((s) => s.peaksDirty);
   const crosshair = usePlotStore((s) => s.crosshair);
   const cursor = usePlotStore((s) => s.cursor);
+  const xView = usePlotStore((s) => s.xView);
   const cellId = useSelectionStore((s) => s.cellId);
+  const view: XDisplay = curve && curve.xAxisType === "generic" ? "generic" : xView;
 
   if (cellId != null) {
     return (
@@ -35,7 +41,7 @@ export function StatusBar() {
     >
       {crosshair && cursor ? (
         <>
-          <span className="tabular">2θ {cursor.x.toFixed(3)}°</span>
+          <span className="tabular">{formatAxisReadout(cursor.x, view)}</span>
           <span className="tabular">I {Math.max(0, Math.round(cursor.y)).toLocaleString()}</span>
         </>
       ) : (

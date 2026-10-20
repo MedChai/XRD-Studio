@@ -270,6 +270,13 @@ export const t = {
     heightRatio: "I(003)/I(104) 峰高比",
     rOrder: "R_order (006+102)/101",
     display: "显示",
+    /** 横轴视图切换(§4.1):2θ/d/Q 是领域符号,保留不译 */
+    xAxisView: "横轴",
+    xAxisTwoTheta: "2θ",
+    xAxisD: "d",
+    xAxisQ: "Q",
+    xAxisGeneric: "该数据集采集轴无法换算",
+    xAxisViewHint: "只影响显示;峰表结果仍按采集轴存储",
     normalization: "归一化",
     normalizationValue: "最大值 = 100",
     offset: "纵向偏移",

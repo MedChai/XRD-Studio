@@ -8,6 +8,7 @@ import {
   useUiStore,
 } from "../../stores";
 import { engineCommand } from "../../services/engine";
+import { axisShortLabel } from "../../services/coords";
 import { cn } from "../../components/cn";
 import { t } from "../../i18n";
 import type { PeakResult } from "../../types/engine";
@@ -44,6 +45,7 @@ function hklTooltip(p: PeakResult): string {
 
 export function PeakDrawer() {
   const peaks = useAnalysisStore((s) => s.peaks);
+  const curve = useAnalysisStore((s) => s.curve);
   // 逐字段选择器(§15):全量解构 useSelectionStore() 会订阅整个 store
   const selectedPeakIndex = useSelectionStore((s) => s.selectedPeakIndex);
   const setSelectedPeak = useSelectionStore((s) => s.setSelectedPeak);
@@ -137,7 +139,11 @@ export function PeakDrawer() {
             <thead className="sticky top-0 bg-[var(--bg-panel)]">
               <tr className="border-b border-[var(--divider)] text-left text-[11px] text-[var(--text-tertiary)]">
                 <th className="px-3 py-1 font-medium">{t.peaks.colIndex}</th>
-                <th className="px-3 py-1 font-medium">{t.peaks.colPosition}</th>
+                {/* 峰位按**采集轴**存储(README §4.1),列头要标它是什么轴,
+                    不是写死 "2θ" —— d/q 采集的数据列头写 2θ 是错的 */}
+                <th className="px-3 py-1 font-medium">
+                  {curve ? axisShortLabel(curve.xAxisType) : t.peaks.colPosition}
+                </th>
                 <th className="px-3 py-1 font-medium">{t.peaks.colHkl}</th>
                 <th className="px-3 py-1 text-right font-medium">{t.peaks.colIntensity}</th>
                 <th className="px-3 py-1 text-right font-medium">{t.peaks.colFwhm}</th>

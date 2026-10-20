@@ -35,6 +35,7 @@ import {
   ecDqdvWaterfall,
   engineCommand,
 } from "../services/engine";
+import type { XView } from "../services/coords";
 import { t } from "../i18n";
 
 // 与 models/types.py 的 dataclass 默认值严格一致(§7.4 快照语义)
@@ -307,6 +308,9 @@ interface PlotState {
   zoom: { from: number; to: number } | null;
   /** 是否叠加显示背景曲线(§7.3 的 Show Background) */
   showBackground: boolean;
+  /** X 轴显示坐标(§4.1 视图层 2θ/d/Q 切换)。纯显示态:峰表结果与 zoom
+   * 仍按采集轴存储(README §4.1),换算只作用于图上 x 映射与读数。 */
+  xView: XView;
   /** 当前 ECharts 实例提供的 PNG 导出函数。图表卸载时清空。 */
   figureExporter: (() => string) | null;
   /** SVG 导出:离屏用 svg renderer 重画同一 option,矢量可进矢量软件。 */
@@ -319,6 +323,7 @@ interface PlotState {
   setXDomain: (d: PlotState["xDomain"]) => void;
   setZoom: (z: PlotState["zoom"]) => void;
   setShowBackground: (v: boolean) => void;
+  setXView: (v: XView) => void;
   setFigureExporter: (fn: (() => string) | null) => void;
   setFigureSvgExporter: (fn: (() => string) | null) => void;
   /** 叠加对比的曲线集合(S4 系列对比)。
@@ -350,6 +355,7 @@ export const usePlotStore = create<PlotState>((set, get) => ({
   xDomain: null,
   zoom: null,
   showBackground: false,
+  xView: "two_theta",
   figureExporter: null,
   figureSvgExporter: null,
   compareCurves: [],
@@ -384,6 +390,7 @@ export const usePlotStore = create<PlotState>((set, get) => ({
   setCompareOffsets: (compareOffsets: PlotState["compareOffsets"]) =>
     set({ compareOffsets }),
   setShowBackground: (showBackground) => set({ showBackground }),
+  setXView: (xView) => set({ xView }),
   setFigureExporter: (figureExporter) => set({ figureExporter }),
   setFigureSvgExporter: (figureSvgExporter) => set({ figureSvgExporter }),
   fitAll: () => {
