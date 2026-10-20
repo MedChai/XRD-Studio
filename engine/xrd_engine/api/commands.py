@@ -2144,13 +2144,19 @@ class Engine:
                        float(w["v_lo"]), float(w["v_hi"]))
             for w in windows_raw
         ] or None
-        peak_kwargs = {
-            k: v for k, v in (raw.get("peak") or {}).items()
-            if k in PeakParams.__dataclass_fields__ and k != "windows"
-        }
+        peak_raw = raw.get("peak") or {}
+        unknown = [k for k in peak_raw if k not in PeakParams.__dataclass_fields__ or k == "windows"]
+        if unknown:
+            # 静默丢弃 = 拼错的参数不生效且 params_hash 不变,用户以为改了
+            raise EngineError(f"未知的 peak 参数: {unknown}")
+        peak_kwargs = {k: v for k, v in peak_raw.items() if k != "windows"}
         if windows is not None:
             peak_kwargs["windows"] = windows
         peak_params = PeakParams(**peak_kwargs) if peak_kwargs else PeakParams()
+        try:
+            peak_params.validate()
+        except ValueError as exc:
+            raise EngineError(f"peak 参数非法:{exc}") from exc
         dq = DQDVParams(
             dv_mv=float(raw.get("dv_mv", 2.0)),
             sg_window=int(raw.get("sg_window", 11)),
@@ -2182,12 +2188,18 @@ class Engine:
             (cell["id"],),
         )
         all_peaks, curves, index = [], {}, []
+        # 曲线只取恒流段(CV 恒压段电压几乎不动,混进 dQ/dV 会在截止电压
+        # 处堆出假尖峰);但**容量口径必须含 CV** —— CCCV 协议下恒压段
+        # 可占大半充电容量,只积恒流会让 qTotal 与循环表对不上。
+        curve_codes = {"charge": (1,), "discharge": (2,)}
+        cap_codes = {"charge": (1, 3), "discharge": (2,)}
+        cap_scale = 1000.0 / dq.mass_mg if dq.mass_mg else 1.0
         for row in cycles:
             if row["incomplete"]:
                 continue
             n = int(row["cycle_index"])
-            for direction, code in (("charge", 1), ("discharge", 2)):
-                mask = (rec["cycle"] == n) & (rec["state"] == code)
+            for direction in ("charge", "discharge"):
+                mask = (rec["cycle"] == n) & np.isin(rec["state"], curve_codes[direction])
                 try:
                     res = compute_dqdv(
                         rec["t"][mask], rec["i"][mask], rec["v"][mask],
@@ -2195,10 +2207,19 @@ class Engine:
                     )
                 except ValueError:
                     continue
+                cap_mask = (rec["cycle"] == n) & np.isin(rec["state"], cap_codes[direction])
+                tt, ii = rec["t"][cap_mask], rec["i"][cap_mask]
+                if tt.size >= 2:
+                    dtc = np.diff(tt)
+                    dtc = np.where(dtc > 0, dtc, 0.0)
+                    q_total = float(np.abs(np.sum(0.5 * (ii[1:] + ii[:-1]) * dtc)) / 3600.0)
+                    q_total *= cap_scale
+                else:
+                    q_total = res.q_total
                 key = f"c{n}_{direction}"
                 curves[f"v_{key}"] = res.v
                 curves[f"y_{key}"] = res.dqdv
-                index.append({"cycle": n, "direction": direction, "qTotal": res.q_total})
+                index.append({"cycle": n, "direction": direction, "qTotal": q_total})
                 for w in peak_params.windows:
                     all_peaks.extend(detect_window_peaks(res, w, peak_params, cycle=n))
         if not curves:
@@ -2209,15 +2230,23 @@ class Engine:
             json.dumps(index, ensure_ascii=False).encode("utf-8"), dtype=np.uint8
         )
         curve_file = f"dqdv_{params_hash}.npz"
-        np.savez_compressed(
-            self.store.abs_path(cell["stored_path"]).parent / curve_file, **curves
-        )
+        cell_dir = self.store.abs_path(cell["stored_path"]).parent
+        # 清掉旧参数组合的曲线缓存:每个参数组合一个文件会让磁盘随
+        # 调参次数无限增长(records.npz 是原始数据,不动)
+        for stale in cell_dir.glob("dqdv_*.npz"):
+            if stale.name != curve_file:
+                with contextlib.suppress(OSError):
+                    stale.unlink()
+        np.savez_compressed(cell_dir / curve_file, **curves)
 
         result = {
             "curveFile": curve_file,
             "nCurves": len(index),
             "nPeaks": len(all_peaks),
             "nTruncated": sum(1 for pk in all_peaks if pk.truncated),
+            # 每段曲线的容量索引(含 CV 的充电口径)。此前只写进 npz,
+            # 命令层从不返回 —— qTotal 算了没人看,属"做了但没生效"
+            "index": index,
             "peaks": [pk.to_dict() for pk in all_peaks],
             "tracks": [tr.to_dict() for tr in tracks],
         }
@@ -2300,6 +2329,7 @@ class Engine:
             "nCurves": result.get("nCurves"),
             "nPeaks": result.get("nPeaks"),
             "nTruncated": result.get("nTruncated"),
+            "index": result.get("index", []),
             "peaks": result.get("peaks", []),
             "tracks": result.get("tracks", []),
         }
@@ -2385,7 +2415,14 @@ class Engine:
             dq_result = json.loads(dq["result_json"])
         except json.JSONDecodeError:
             raise EngineError("dQ/dV 结果损坏,请先重新计算") from None
-        mass = cell["active_mass_mg"]
+        # 容量口径必须与 dQ/dV 峰一致:峰按 (params.mass_mg or cell mass) 缩放,
+        # 这里若只用 cell mass,用户在 dQ/dV 页改过 mass 后两套分量差一个质量比,
+        # 闭合归一化会把错误按比例摊进三分量且看不出来。
+        try:
+            dq_params = json.loads(dq["params_json"] or "{}")
+        except json.JSONDecodeError:
+            dq_params = {}
+        mass = dq_params.get("mass_mg") or cell["active_mass_mg"]
         scale = 1000.0 / mass if mass else 1.0
         cycles = [
             {
@@ -2458,7 +2495,9 @@ class Engine:
         try:
             result = json.loads(row["result_json"])
         except json.JSONDecodeError:
-            result = {}
+            # 与 dqdv_result 的 corrupt 语义一致:损坏就说损坏,
+            # 不能 computed=true 带空体让前端拿去 .map 崩掉整棵树
+            return {"computed": False, "corrupt": True}
         return {
             "computed": True,
             "stale": bool(dq is not None and dq["params_hash"] != result.get("sourceDqdvHash")),

@@ -68,6 +68,8 @@ class AttributionResult:
     truncated_evidence: dict[str, Any] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
     conclusion: str = ""
+    # 方法 B 峰序列不足时置位:此时三分量只是残差拆分,结论不能断言机理
+    split_uninformative: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         last = self.cycles[-1] if self.cycles else None
@@ -109,8 +111,19 @@ def run_attribution(
         params = AttributionParams()
     params.validate()
     valid = [c for c in cycles if not c.get("incomplete") and c.get("q_discharge")]
-    main = [c for c in valid if c.get("rate_group", "main") != params.checkup_group]
     checkup = [c for c in valid if c.get("rate_group") == params.checkup_group]
+    # 主倍率圈只取 "main" 簇。**fast 必须排除**:倍率阶梯里高速率圈容量
+    # 天然低,混进基线会被算成"衰减"。
+    main = [
+        c for c in valid
+        if c.get("rate_group", "main") == "main" and c.get("rate_group") != params.checkup_group
+    ]
+    if len(main) < 3:
+        # 主簇缺席(异常分组)时退回"非回访且非快充",仍不把 fast 圈当衰减
+        main = [
+            c for c in valid
+            if c.get("rate_group", "main") not in ("fast", params.checkup_group)
+        ]
     if len(main) < 3:
         raise ValueError(f"有效主倍率圈不足({len(main)}),无法归因")
 
@@ -148,9 +161,9 @@ def run_attribution(
     if use_a:
         _attribution_method_a(result, q, main, checkup, baseline)
     else:
-        _attribution_method_b(result, q, main, baseline, peaks)
+        _attribution_method_b(result, q, main, baseline, peaks, window_keys(peaks))
 
-    _truncate_evidence(result, peaks)
+    _truncate_evidence(result, peaks, window_keys(peaks)[1])
     _conclusion(result)
     return result
 
@@ -171,9 +184,12 @@ def _attribution_method_a(
     order = np.argsort(ck_x)
     ck_x, ck_y = ck_x[order], ck_y[order]
     ck_base = float(ck_y[0])
+    n_extrap = 0
 
     for c in sorted(main, key=lambda x: x["index"]):
         n = c["index"]
+        if n > ck_x[-1]:
+            n_extrap += 1
         total = baseline - q[n]
         if total <= 0:
             result.cycles.append(AttributionCycle(n, max(total, 0.0)))
@@ -189,9 +205,43 @@ def _attribution_method_a(
         if s > total and s > 0:
             pol, mat, cut = pol * total / s, mat * total / s, cut * total / s
         result.cycles.append(AttributionCycle(n, total, pol, mat, cut))
+    if n_extrap:
+        # np.interp 在末回访点外钳制:此后的衰减全部落进截断残差,
+        # 结论若说"截断主导"其实是外推假设,必须写明
+        result.notes.append(
+            f"有 {n_extrap} 个圈在最后一次回访圈之后,"
+            "该段极化/活性按末次回访值外推,衰减计入截断残差 —— "
+            "回访圈覆盖不足时不要把结论读成'截断主导'的直接证据。"
+        )
 
 
 # ---------------------------------------------------------------- 方法 B
+
+
+def window_keys(peaks: list[Any]) -> tuple[str | None, str | None]:
+    """从实际检峰结果推断 (极化主窗口, 截断证据窗口) 的 key。
+
+    岛外命名("H1H2"/"H2H3")只是默认窗口的名字,自定义窗口下硬编码它
+    会让方法 B 全部算成截断、结论还断言"截断主导"。没有约定名时:
+    极化主窗口取检出峰最多的放电窗,截断证据取电压最高的充电窗
+    (截断发生在高压侧)。
+    """
+    if not peaks:
+        return None, None
+    discharge_counts: dict[str, int] = {}
+    charge_keys: dict[str, float] = {}
+    for p in peaks:
+        if p.direction == "discharge":
+            discharge_counts[p.window_key] = discharge_counts.get(p.window_key, 0) + 1
+        elif p.direction == "charge":
+            charge_keys[p.window_key] = max(charge_keys.get(p.window_key, -1e9), p.position)
+    pol_key = "H1H2" if "H1H2" in discharge_counts else (
+        max(discharge_counts, key=discharge_counts.get) if discharge_counts else None
+    )
+    cut_key = "H2H3" if "H2H3" in charge_keys else (
+        max(charge_keys, key=charge_keys.get) if charge_keys else None
+    )
+    return pol_key, cut_key
 
 
 def _dominant_series(
@@ -217,10 +267,11 @@ def _attribution_method_b(
     main: list[dict],
     baseline: float,
     peaks: list[Any],
+    keys: tuple[str | None, str | None],
 ) -> None:
     """峰位移/峰面积近似法(置信度低,notes 建议补回访圈)。
 
-    序列取"放电 H1H2 每圈最强峰",缺圈对位置/面积线性插值 ——
+    序列取"放电主窗口每圈最强峰",缺圈对位置/面积线性插值 ——
     保证每个主倍率圈都有分量,不随检峰空洞断档。
     """
     result.notes.append(
@@ -228,10 +279,14 @@ def _attribution_method_b(
         "后续实验建议每 ~50 圈插入一个 C/10 回访圈,归因将升级为方法 A。"
     )
     main_set = {c["index"] for c in main}
-    series = _dominant_series(peaks, "discharge", "H1H2", main_set)
+    pol_key = keys[0]
+    series = _dominant_series(peaks, "discharge", pol_key, main_set) if pol_key else {}
     if len(series) < 3:
-        result.notes.append("放电 H1H2 峰序列不足,活性/极化无法估算")
+        result.notes.append(
+            f"放电主窗口({pol_key or '无'})峰序列不足,活性/极化无法估算"
+        )
         series = {}
+        result.split_uninformative = True
 
     pol_s: dict[int, float] = {}
     mat_s: dict[int, float] = {}
@@ -266,9 +321,13 @@ def _attribution_method_b(
 # ---------------------------------------------------------------- 证据与结论
 
 
-def _truncate_evidence(result: AttributionResult, peaks: list[Any]) -> None:
-    """充电 H2H3 截断峰统计:相变在窗口内做不完的直接证据。"""
-    h3 = [p for p in peaks if p.direction == "charge" and p.window_key == "H2H3"]
+def _truncate_evidence(result: AttributionResult, peaks: list[Any], cut_key: str | None) -> None:
+    """充电高压侧窗口的截断峰统计:相变在窗口内做不完的直接证据。
+
+    窗口 key 由 window_keys 推断(默认 "H2H3",自定义窗口取最高压充电窗),
+    不能写死 —— 自定义窗口下写死会永远 available=False,截断结论没有证据。
+    """
+    h3 = [p for p in peaks if p.direction == "charge" and cut_key and p.window_key == cut_key]
     trunc = [p for p in h3 if p.truncated]
     full = [p for p in h3 if not p.truncated]
     if not h3:
@@ -277,6 +336,7 @@ def _truncate_evidence(result: AttributionResult, peaks: list[Any]) -> None:
     positions = [p.position for p in h3]
     result.truncated_evidence = {
         "available": True,
+        "window": cut_key,
         "nTruncatedCycles": len(trunc),
         "nFullCycles": len(full),
         "firstPosition": round(min(positions), 3),
@@ -293,6 +353,16 @@ def _conclusion(result: AttributionResult) -> None:
     last = result.cycles[-1]
     if last.total <= 0.5:
         result.conclusion = "容量无明显衰减。"
+        return
+    if result.split_uninformative:
+        # 峰序列不足时三分量只是残差堆在截断上,不能当成"截断主导"的结论
+        result.conclusion = (
+            f"第 {last.cycle} 圈累计衰减 {last.total:.1f} mAh/g"
+            f"(基线 {result.baseline:.1f}),"
+            "但放电主峰序列不足,极化/活性/截断三分量无法拆分"
+            "(该拆分把全部残差记入截断项,不代表机理判断)。"
+            "建议补做低倍率回访圈,或降低寻峰高度阈值后重算。"
+        )
         return
     parts = {
         "polarization": (last.polarization, "极化型(界面/动力学方向:优先排查界面副反应、电解液氧化与阻抗增长)"),

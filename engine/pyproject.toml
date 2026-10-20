@@ -5,7 +5,7 @@ description = "XRD Studio 分析引擎"
 requires-python = ">=3.11"
 
 dependencies = [
-    "numpy>=1.26",
+    "numpy>=2.0",
     "scipy>=1.11",
     "openpyxl>=3.1",
 ]

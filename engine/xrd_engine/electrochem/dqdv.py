@@ -105,11 +105,14 @@ def compute_dqdv(
 
     warnings: list[str] = []
     dt = np.diff(t)
-    if (dt < 0).any():
-        warnings.append("时间存在回退段,已按 dt<0 剔除")
-        keep = np.concatenate(([True], dt > 0))
-        t, i, v = t[keep], i[keep], v[keep]
-        dt = np.diff(t)
+    n_back = int((dt < 0).sum())
+    if n_back:
+        # 时间回退(仪器重启/导出拼接)处 Δt 计 0,容量按各连续段累计。
+        # **不能只删回退后的第一个点**:删完残留的 dt 仍是大负数,实测
+        # 一次重启就把 q_total 腰斩,且 q 上的负阶跃经插值会变成深谷
+        # 污染峰检测。
+        warnings.append(f"时间存在 {n_back} 处回退(疑似仪器重启/导出拼接),已按连续段累计容量")
+    dt = np.where(dt > 0, dt, 0.0)
 
     # 累计容量(mAh):梯形积分,方向绝对值
     q = np.concatenate(([0.0], np.cumsum(np.abs(i[:-1] + i[1:]) * 0.5 * dt) / 3600.0))
@@ -138,7 +141,13 @@ def compute_dqdv(
     win = params.sg_window
     while win >= len(dqdv_raw) and win > 5:
         win -= 2
-    dqdv = _savgol(dqdv_raw, win, params.sg_poly) if len(dqdv_raw) > 5 else dqdv_raw
+    if len(dqdv_raw) > 5:
+        dqdv, sg_ok = _savgol(dqdv_raw, win, params.sg_poly)
+        if not sg_ok:
+            # 退化为窗口均值后峰形与 SG 完全不同,必须让用户知道
+            warnings.append("SG 平滑未能生效(窗口/多项式阶不满足),已退化为窗口均值")
+    else:
+        dqdv = dqdv_raw
 
     per_gram = params.mass_mg is not None
     scale = 1000.0 / params.mass_mg if per_gram else 1.0   # mAh→mAh/g (mg)
@@ -159,14 +168,24 @@ def compute_dqdv(
     )
 
 
-def _savgol(x: np.ndarray, window: int, poly: int) -> np.ndarray:
-    """SG 平滑;scipy 可用时用之,纯 numpy 兜底(移动多项式拟合省略,退化为窗口均值)。"""
+def _savgol(x: np.ndarray, window: int, poly: int) -> tuple[np.ndarray, bool]:
+    """SG 平滑,返回 (y, 是否真正走成 SG)。
+
+    scipy 不可用或窗口 ≤ 多项式阶时退化为窗口均值 —— 形状与 SG 完全
+    不同,调用方必须把退化写进 warnings,不能静默换算法。
+    """
+    if window % 2 == 0:
+        window -= 1
+    if window <= poly or window < 3:
+        poly = max(0, window - 2)
+        if window < 3:
+            return x.copy(), False
     try:
         from scipy.signal import savgol_filter
 
-        return savgol_filter(x, window, poly)
+        return savgol_filter(x, window, poly), True
     except Exception:
         kernel = np.ones(window) / window
         pad = window // 2
         padded = np.pad(x, pad, mode="edge")
-        return np.convolve(padded, kernel, mode="valid")
+        return np.convolve(padded, kernel, mode="valid"), False

@@ -15,8 +15,9 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
-from datetime import time, timedelta
+from datetime import datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -55,12 +56,19 @@ _CYCLE_LEGACY_COLS: dict[str, int] = {
 }
 
 # 状态原文 → 归一化方向。顺序即匹配优先级,前缀匹配。
+#
+# "cv"/"cc" 必须排在单字母 "c"/"d" 之前:英文 "CV" 会被 "c" 前缀抢走
+# 变成恒流充电,CV 段容量的归属会随语言写法漂移。"充电"/"放电"(无
+# "恒流"前缀)按恒流处理 —— 蓝电部分版本只写方向,而静默丢行比把
+# 它当恒流更糟(丢行会把整圈容量抹掉且不报错)。
 _STATE_MAP: list[tuple[str, str]] = [
-    ("ratec", "charge"), ("rateC", "charge"),
-    ("恒流充电", "charge"), ("恒压", "charge_cv"), ("cc", "charge"),
-    ("c", "charge"),
-    ("rated", "discharge"), ("rateD", "discharge"),
+    ("ratec", "charge"),
+    ("恒流充电", "charge"), ("恒压", "charge_cv"),
+    ("cc", "charge"), ("cv", "charge_cv"), ("c", "charge"),
+    ("充电", "charge"),
+    ("rated", "discharge"),
     ("恒流放电", "discharge"), ("dc", "discharge"), ("d", "discharge"),
+    ("放电", "discharge"),
     ("r", "rest"), ("静置", "rest"), ("rest", "rest"), ("搁置", "rest"),
     ("idle", "rest"), ("stand", "rest"),
 ]
@@ -141,32 +149,55 @@ def _norm_header(raw: Any) -> str:
 
 
 def _match_columns(header: list[Any], required: dict[str, tuple[str, ...]]) -> dict[str, int]:
-    """把表头映射到逻辑列。必需列缺失时抛 LandParseError。"""
+    """把表头映射到逻辑列。必需列缺失时抛 LandParseError。
+
+    匹配分三级偏好:精确 → 前缀 → 子串。不能一上来就子串 ——
+    `time` 会命中 `steptime`/`cycle-time`,把步时间当累计时间,
+    后续容量积分与回退过滤全链条错位且不报错。
+    """
     cols: dict[str, int] = {}
     normed = [_norm_header(h) for h in header]
-    for key, synonyms in required.items():
-        for syn in synonyms:
-            syn_n = syn.lower()
-            for idx, h in enumerate(normed):
-                if h and (h == syn_n or h.startswith(syn_n) or syn_n in h):
-                    if key not in cols:
-                        cols[key] = idx
-                    break
+    for mode in ("exact", "prefix", "contains"):
+        for key, synonyms in required.items():
             if key in cols:
-                break
+                continue
+            for syn in synonyms:
+                syn_n = syn.lower()
+                for idx, h in enumerate(normed):
+                    if not h:
+                        continue
+                    hit = (
+                        h == syn_n
+                        if mode == "exact"
+                        else h.startswith(syn_n)
+                        if mode == "prefix"
+                        else syn_n in h
+                    )
+                    if hit and idx not in cols.values():
+                        cols[key] = idx
+                        break
+                if key in cols:
+                    break
     return cols
 
 
 def parse_time_value(raw: Any) -> float | None:
     """时间列取值 → 累计秒。
 
-    兼容: datetime.time / timedelta / "HH:MM:SS" / "D-HH:MM:SS" /
-    "D:HH:MM:SS" / 纯数字(秒)。
+    兼容: datetime.time / datetime.datetime / timedelta /
+    "HH:MM:SS" / "D-HH:MM:SS" / "D:HH:MM:SS" / "2026/10/06 12:34:56" /
+    纯数字(秒)。
+
+    datetime.datetime 与带日期的文本返回**相对同一纪元的秒数**;调用方
+    (记录表循环)再统一减去首行纪元。此前这两类取值直接返回 None 被
+    整行丢弃 —— 一张 7184 行的表只剩 29 行还能"导入成功",不报错。
     """
     if raw is None:
         return None
     if isinstance(raw, timedelta):
         return raw.total_seconds()
+    if isinstance(raw, datetime):
+        return raw.timestamp()
     if isinstance(raw, time):
         return raw.hour * 3600 + raw.minute * 60 + raw.second + raw.microsecond / 1e6
     s = str(raw).strip()
@@ -176,22 +207,44 @@ def parse_time_value(raw: Any) -> float | None:
         return float(s)
     except ValueError:
         pass
+    # 带日期的文本("2026/10/06 12:34:56"、"2026-10-06 12:34:56")→ 纪元秒
+    dt = _try_parse_datetime_text(s)
+    if dt is not None:
+        return dt.timestamp()
     days = 0
-    head = s.split(":")[0]
-    if "-" in head:  # "44-13:35:26"
-        d_part, s = s.split("-", 1)
-        days = int(d_part)
+    # "44-13:35:26"(D-HH:MM:SS):只有「纯数字-时间」形状才算,
+    # 避免把其它带连字符的写法误切成天。
+    m = re.match(r"^(\d+)-(\d{1,2}:\d{1,2}:\d{1,2}(?:\.\d+)?)$", s)
+    if m:
+        days = int(m.group(1))
+        s = m.group(2)
     s = s.replace("+", "")
     parts = s.split(":")
     try:
         if len(parts) == 3:
-            h, m, sec = parts
-            return days * 86400 + int(h) * 3600 + int(m) * 60 + float(sec)
+            h, mnt, sec = parts
+            return days * 86400 + int(h) * 3600 + int(mnt) * 60 + float(sec)
         if len(parts) == 4:  # D:HH:MM:SS
-            d, h, m, sec = parts
-            return int(d) * 86400 + int(h) * 3600 + int(m) * 60 + float(sec)
+            d, h, mnt, sec = parts
+            return int(d) * 86400 + int(h) * 3600 + int(mnt) * 60 + float(sec)
     except ValueError:
         return None
+    return None
+
+
+def _try_parse_datetime_text(s: str) -> datetime | None:
+    """识别 "YYYY/MM/DD HH:MM:SS" / "YYYY-MM-DD HH:MM:SS" 等日期时间文本。"""
+    norm = s.replace("/", "-")
+    for fmt in (
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M:%S.%f",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d",
+    ):
+        try:
+            return datetime.strptime(norm, fmt)
+        except ValueError:
+            continue
     return None
 
 
@@ -251,6 +304,11 @@ def _parse_xlsx(path: Path) -> LandFile:
         lf = _parse_record_sheet(wb[record_sheet], str(path))
         if cycle_sheet is not None:
             _attach_cycle_table(lf, wb[cycle_sheet])
+        else:
+            # 无循环表(蓝电导出可只勾记录表)也必须从记录表积分出圈 ——
+            # 此前圈构建埋在 _attach_cycle_table 里,缺循环表就 0 圈,
+            # 导入"成功"但 dQ/dV 永远算不了。
+            _build_cycles(lf, {})
         if flow_sheet is not None:
             _attach_flow_sheet(lf, wb[flow_sheet])
         _finalize_qa(lf)
@@ -292,22 +350,45 @@ def _parse_record_sheet(ws, source: str) -> LandFile:
     step_list: list[int] = []
     state_list: list[int] = []
     skipped = 0
+    skip_reasons = {"time": 0, "state": 0, "value": 0}
+    # datetime/日期文本时间列返回纪元秒,最后统一减去首行纪元折算成相对秒
+    epoch: float | None = None
 
     cyc_col = cols.get("cycle")
     step_col = cols.get("step")
+    n_rows = 0
     for row in ws.iter_rows(min_row=header_row + 1, values_only=True):
+        if row is None or all(c is None for c in row):
+            continue
+        n_rows += 1
         t = parse_time_value(row[cols["time"]])
         if t is None:
             skipped += 1
+            skip_reasons["time"] += 1
             continue
         st = _norm_state(row[cols["state"]]) if cols["state"] < len(row) else -1
         cur = _to_float(row[cols["current"]])
         vol = _to_float(row[cols["voltage"]])
-        if np.isnan(cur) or np.isnan(vol) or st < 0:
+        if st < 0:
             skipped += 1
+            skip_reasons["state"] += 1
             continue
-        cyc = int(row[cyc_col]) if cyc_col is not None and row[cyc_col] is not None else -1
-        step = int(row[step_col]) if step_col is not None and row[step_col] is not None else -1
+        if np.isnan(cur) or np.isnan(vol):
+            skipped += 1
+            skip_reasons["value"] += 1
+            continue
+        if epoch is None:
+            epoch = t
+        # 循环/工步序号解析失败按缺失(-1)处理,不能让 int() 的 ValueError
+        # 落到 handle() 兜底变成"引擎内部错误"
+        try:
+            cyc = int(row[cyc_col]) if cyc_col is not None and row[cyc_col] is not None else -1
+        except (TypeError, ValueError):
+            cyc = -1
+        try:
+            step = int(row[step_col]) if step_col is not None and row[step_col] is not None else -1
+        except (TypeError, ValueError):
+            step = -1
         t_list.append(t)
         i_list.append(cur)
         v_list.append(vol)
@@ -315,10 +396,40 @@ def _parse_record_sheet(ws, source: str) -> LandFile:
         step_list.append(step)
         state_list.append(st)
 
+    # 静默丢行防线:解析失败行数占多数时必须报错,不能"导入成功"一张空壳
+    # (真实样例:datetime 时间列全列解析失败,7184 行只剩 29 行还在跑通)。
+    if n_rows > 0 and not t_list:
+        raise LandParseError(
+            f"记录表 {n_rows} 行全部解析失败"
+            f"(时间列 {skip_reasons['time']} 行无法识别、状态列 {skip_reasons['state']} 行无法识别),"
+            "请确认导出的是蓝电记录表"
+        )
+    if n_rows >= 100 and skipped > 0.5 * n_rows:
+        raise LandParseError(
+            f"记录表过半行无法解析({skipped}/{n_rows}:"
+            f"时间 {skip_reasons['time']}、状态 {skip_reasons['state']}、数值 {skip_reasons['value']}),"
+            "多半是时间列或工步状态的写法未识别,请反馈样例"
+        )
+
+    t_arr = np.asarray(t_list, dtype=np.float64)
+    # 只在确实是纪元秒(1970 年以来)时做相对化:纯秒数时间列不受影响
+    if epoch and epoch > 1e9 and t_arr.size:
+        t_arr = t_arr - epoch
+    # Excel 时长数值的单位是「天」:若被当秒读进来的中位间隔小到不可能
+    # (亚毫秒采样),按天解释重标为秒。必须在积分之前做 —— 容量 ∫I·dt
+    # 差一个 86400 倍照样"看起来合理"。
+    time_unit_rescaled = False
+    if t_arr.size > 10:
+        pos_dt = np.diff(t_arr)
+        pos_dt = pos_dt[pos_dt > 0]
+        if pos_dt.size and float(np.median(pos_dt)) < 1e-3 and float(t_arr.max()) < 600:
+            t_arr = t_arr * 86400.0
+            time_unit_rescaled = True
+
     lf = LandFile(
         source=source,
         session=SessionInfo(),
-        t=np.asarray(t_list, dtype=np.float64),
+        t=t_arr,
         i=np.asarray(i_list, dtype=np.float64),
         v=np.asarray(v_list, dtype=np.float64),
         cycle=np.asarray(cyc_list, dtype=np.int32),
@@ -327,6 +438,10 @@ def _parse_record_sheet(ws, source: str) -> LandFile:
         cycles=[],
     )
     lf.qa["skipped_rows"] = skipped
+    lf.qa["skip_reasons"] = skip_reasons
+    lf.qa["time_epoch_based"] = bool(epoch and epoch > 1e9)
+    if time_unit_rescaled:
+        lf.qa["time_unit_rescaled"] = "days->seconds"
     return lf
 
 
@@ -337,11 +452,6 @@ def _attach_cycle_table(lf: LandFile, ws) -> None:
     不同列时位置会变。缺的列给 nan(比容量/效率可缺);前 6 行认不出
     表头才回退旧蓝电固定 0..5 布局,比瞎猜更接近原行为。
     """
-    # 记录表先积分出每圈容量
-    seg_c = _integrate_by_cycle(lf, "charge")
-    seg_d = _integrate_by_cycle(lf, "discharge")
-    unique_cycles = sorted({int(n) for n in lf.cycle.tolist() if n >= 0})
-
     cols: dict[str, int] | None = None
     start_row = 2  # 旧行为:表头占第 1 行
     for ridx, row in enumerate(ws.iter_rows(min_row=1, max_row=6, values_only=True), start=1):
@@ -380,21 +490,8 @@ def _attach_cycle_table(lf: LandFile, ws) -> None:
         }
 
     lf.cycles = []
-    for n in unique_cycles:
-        c = LandCycle(
-            index=n,
-            q_charge=seg_c.get(n, 0.0),
-            q_discharge=seg_d.get(n, 0.0),
-        )
-        c.ce = c.q_discharge / c.q_charge if c.q_charge > 0 else 0.0
-        ref = by_cycle.get(n, {})
-        c.ref_q_charge = ref.get("ref_q_charge", float("nan"))
-        c.ref_q_discharge = ref.get("ref_q_discharge", float("nan"))
-        c.ref_q_charge_g = ref.get("ref_q_charge_g", float("nan"))
-        c.ref_q_discharge_g = ref.get("ref_q_discharge_g", float("nan"))
-        c.ref_ce = ref.get("ref_ce", float("nan"))
-        _fill_cycle_stats(lf, c)
-        lf.cycles.append(c)
+    _build_cycles(lf, by_cycle)
+    lf.qa["cycle_table_matched"] = cols is not None
 
 
 def cycle_dicts(lf: LandFile, mass_mg: float | None = None) -> list[dict[str, Any]]:
@@ -446,21 +543,65 @@ def _fill_cycle_stats(lf: LandFile, c: LandCycle) -> None:
     c.has_cv = bool((st == 3).any())
 
 
+def _build_cycles(lf: LandFile, by_cycle: dict[int, dict[str, float]]) -> None:
+    """从记录表积分出每圈容量,合并循环表参照值,写入 lf.cycles。
+
+    无循环表时 by_cycle 传 {} —— 圈仍然必须建出来(ref_* 为 nan),
+    否则"只勾记录表"的导出会得到一个永远算不了的死数据集。
+    """
+    seg_c = _integrate_by_cycle(lf, "charge")
+    seg_d = _integrate_by_cycle(lf, "discharge")
+    unique_cycles = sorted({int(n) for n in lf.cycle.tolist() if n >= 0})
+    lf.cycles = []
+    for n in unique_cycles:
+        c = LandCycle(
+            index=n,
+            q_charge=seg_c.get(n, 0.0),
+            q_discharge=seg_d.get(n, 0.0),
+        )
+        c.ce = c.q_discharge / c.q_charge if c.q_charge > 0 else 0.0
+        ref = by_cycle.get(n, {})
+        c.ref_q_charge = ref.get("ref_q_charge", float("nan"))
+        c.ref_q_discharge = ref.get("ref_q_discharge", float("nan"))
+        c.ref_q_charge_g = ref.get("ref_q_charge_g", float("nan"))
+        c.ref_q_discharge_g = ref.get("ref_q_discharge_g", float("nan"))
+        c.ref_ce = ref.get("ref_ce", float("nan"))
+        _fill_cycle_stats(lf, c)
+        lf.cycles.append(c)
+
+
 def _integrate_by_cycle(lf: LandFile, direction: str) -> dict[int, float]:
-    """按圈积分指定方向的容量(mAh)。时间回退(重启)处 Δt 记 0。"""
-    code = STATE_CODES[direction]
+    """按圈积分指定方向的容量(mAh)。时间回退(重启)处 Δt 记 0。
+
+    充电方向**必须含恒压(state=3)段**:CCCV 协议下 CV 段可以占大半容量,
+    只积 state=1 会让充电容量系统性偏低、CE 虚高甚至超过 100%。
+    放电方向目前只有恒流(2)一种状态码。
+    """
+    if direction == "charge":
+        codes = (STATE_CODES["charge"], STATE_CODES["charge_cv"])
+    else:
+        codes = (STATE_CODES["discharge"],)
     out: dict[int, float] = {}
     t, i, cyc, st = lf.t, lf.i, lf.cycle, lf.state
     for n in {int(x) for x in cyc.tolist() if x >= 0}:
-        mask = (cyc == n) & (st == code)
+        mask = (cyc == n) & np.isin(st, codes)
         idx = np.flatnonzero(mask)
         if idx.size < 2:
             out[n] = 0.0
             continue
-        dt = np.diff(t[idx])
-        dt = np.where(dt > 0, dt, 0.0)  # 重启导致的回退不计
-        mid_i = 0.5 * (i[idx][1:] + i[idx][:-1])  # 梯形
-        out[n] = float(np.abs(np.sum(mid_i * dt)) / 3600.0)
+        # 只在相邻行的连续段内积分:同圈充电被静置打断时,静置时长不能按
+        # 边界电流桥接进去(10 min rest × 边界 70 mA ≈ 12 mAh,比整圈容量
+        # 还大一个量级)。CC→CV 状态切换行是相邻的,不受影响。
+        runs = np.split(idx, np.flatnonzero(np.diff(idx) != 1) + 1)
+        total = 0.0
+        for run in runs:
+            if run.size < 2:
+                continue
+            dt = np.diff(t[run])
+            dt = np.where(dt > 0, dt, 0.0)  # 重启导致的回退不计
+            mid_i = 0.5 * (i[run][1:] + i[run][:-1])  # 梯形
+            total += float(np.abs(np.sum(mid_i * dt)) / 3600.0)
+        out[n] = total
     return out
 
 
