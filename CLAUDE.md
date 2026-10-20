@@ -149,7 +149,8 @@ previewing →(300ms 无新输入) committing(PATCH analyses,落库)
 
 - `analysisStore.DEFAULT_PIPELINE` 的默认值**必须与 `engine/xrd_engine/models/types.py` 的 dataclass 默认值严格一致**。
 - **缩放窗口用数据坐标(2θ)而不是百分比** —— 百分比是相对当前曲线值域的,切换数据集后旧百分比会落在新曲线的错误位置,表现为"图是空的"且极难排查。
-- 纯显示层参数(Normalize / Offset / 曲线显隐)在前端就地生效,**不走引擎**;算法类参数(Crop/Background/Smooth/Peaks)必须进引擎。
+- 纯显示层参数(Normalize / Offset / 曲线显隐 / 横轴 2θ/d/Q 视图)在前端就地生效,**不走引擎**;算法类参数(Crop/Background/Smooth/Peaks)必须进引擎。
+- 横轴视图换算走 `app/src/services/coords.ts`(**镜像** `engine/xrd_engine/coords.py` 的公式,改一边要同步另一边);zoom 与峰表永远按**采集轴**存,切视图只换图上 x 映射(README §4.1)。
 
 ### 8. i18n:所有用户可见文案走 `t`
 
@@ -355,18 +356,20 @@ Inspector 参数预设区、峰表双击左界/右界。
 ### 已知缺口
 
 - **灵敏度映射表未经真实谱人工校准**(`peaks/detection.py` 的 `SENSITIVITY_PROMINENCE_FACTOR` 与 `SENSITIVITY_LOCAL_SIGMA`),需 5–10 张实测谱评审。`CALIBRATION_VERSION` 仍是 `0.1-initial`。
-- **高镍识别单物相假设**:只建 R-3m 层状相。样品含杂相(残碱 Li₂CO₃/LiOH、尖晶石)时未建模的峰会报 `none` 而非误标 —— 这是刻意的保守行为,但 UI 应提示"存在未归属峰",否则用户会以为"没标 = 没有"。
+- **高镍识别单物相假设**:只建 R-3m 层状相。样品含杂相(残碱 Li₂CO₃/LiOH、尖晶石)时未建模的峰会报 `none` 而非误标 —— 这是刻意的保守行为;UI 已有"存在 N 个未归属峰"警告(Inspector),但识别本身仍不建杂相模型。
 - **(006)/(102) 在 FWHM ≳ 0.35° 时物理上不可分**(间距/FWHM ≈ 1.0)。此时应返回 `ambiguous` 或只有一个分量,不要试图硬分。宽峰时 `assign_peaks` 已用 1.2× 间距触发降级。
 - PDF 导出未实现;CSV、PNG、SVG 已可用。
-- Sidecar 打包路线(uv 内嵌运行时 vs PyInstaller onedir)未决策,`XRD_ENGINE` 注入点是为此预留的。用户要求"先做完功能再打包"。
+- Sidecar 打包路线已定:**PyInstaller onedir**(`build-installer.bat` 出 NSIS 安装包,sidecar 为同目录 `xrd-engine.exe`);`XRD_ENGINE` 注入点保留,用于指定自定义引擎可执行文件。
 - 前端无测试框架(Vitest/ESLint 都没有);类型检查靠 `npm run build` 里的 `tsc`。
 - `material_profiles` 无 UPDATE/DELETE,前端每次「保存档案」都新增重复行。
 
 ### 环境事实(不是缺口,但会影响判断)
 
-- 数据库 `SCHEMA_VERSION = 6`;加列走 `db.py` 的 `_MIGRATIONS` 幂等迁移,**不重建表**。
+- 数据库 `SCHEMA_VERSION = 7`;加列走 `db.py` 的 `_MIGRATIONS` 幂等迁移,**不重建表**。
   迁移的 `version` 字段是**真门控**(读一次 `PRAGMA user_version`,小于目标才跑),
-  早期版本的它被忽略过,别改回去。v6 = `analyses.annotation_json`(标注持久化)。
+  早期版本的它被忽略过,别改回去。历史:v5 = `datasets.batch_id`+`samples.links_json`,
+  v6 = `analyses.annotation_json`(标注持久化);`batches`/`ec_*` 建表走 `_SCHEMA`
+  的 `CREATE IF NOT EXISTS`。
 - **用户真实数据在 `%LOCALAPPDATA%\XRDStudio\data\<ULID>\original.txt`**
   (Rigaku SmartLab,Cu Kα1=1.540593,5–100°,步长 0.02°,4751 点),是验证识别
   算法的宝贵资产 —— 改动 `indexing.py` 后应在其上回归。

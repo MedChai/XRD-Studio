@@ -162,37 +162,51 @@ xrd_engine/electrochem/          # 领域模块，对齐 high_ni/ 的组织方�
 ├── land_parser.py               # xlsx/xls/csv 解析 + 列映射 + 分圈 + QA
 ├── dqdv.py                      # 电压网格重采样 + SG 平滑 + dQ/dV
 ├── peaks.py                     # 窗口峰检测 + 跨圈轨迹匹配
-├── attribution.py               # 三分量归因 + 结论文本规则
-└── report.py                    # 表格/图/报告导出
+└── attribution.py               # 三分量归因 + 结论文本规则
 ```
+
+> 2026-10-20 按实现对齐:原计划的 `report.py` 未单列(导出走
+> `api/commands.py` 的 `ec.export`),下表命令名改为实际分发名。
 
 **命令命名空间 `ec.*`**（走 `api/commands.py` 现有 `_cmd_ec_*` 分发，JSON+二进制信封协议不动）：
 
 | 命令 | 作用 |
 |---|---|
-| `ec.parse_preview` | dry-run：列映射 + 圈统计 + QA，不落库 |
-| `ec.import_land` | 正式导入，建 cell + 圈记录 |
+| `ec.preview` | dry-run：列映射 + 圈统计 + QA，不落库 |
+| `ec.import` | 正式导入，建 cell + 圈记录(解析缓存写 records.npz) |
+| `ec.cells` | 样品下的 cell 列表 |
 | `ec.cell_overview` | 容量/CE/倍率分组总览 |
-| `ec.dqdv_compute` | 计算 dQ/dV（**显式触发**，结果持久化） |
+| `ec.dqdv_compute` | 计算 dQ/dV + 峰检测 + 轨迹生成(**显式触发**,一次算完,结果持久化) |
+| `ec.dqdv_state` / `ec.dqdv_result` | 是否已算 / 结果(峰 + 轨迹)读回 |
 | `ec.dqdv_curve` | 取曲线数据（信封二进制） |
-| `ec.peaks_detect` | 峰检测 + 轨迹生成 |
-| `ec.peaks_tracks` | 轨迹数据 |
+| `ec.dqdv_waterfall` | 逐圈瀑布图数据 |
 | `ec.attribution_run` / `ec.attribution_get` | 归因计算/查询 |
-| `ec.export_table` / `ec.export_figure` / `ec.report_generate` | 导出 |
+| `ec.export` | CSV 导出:`kind` ∈ cycles / peaks / attribution |
+
+~~`ec.peaks_detect` / `ec.peaks_tracks`~~ 并入 `ec.dqdv_compute` / `ec.dqdv_result`
+(峰与轨迹依赖 dQ/dV 曲线,单独触发只会造出"有峰没曲线"的中间态);
+~~`ec.report_generate`~~ 未实现,导出以 CSV 为准。
 
 **关键设计决定（对齐你定下的标注哲学）**：dQ/dV、峰、归因都是"算一次、存结果"，参数变更不自动重算，只在界面上亮"已过期"徽标，点了才刷新。大文件（万圈级）导入与计算走分块增量，沿用二进制 Envelope 的经验。
 
-### 4.2 数据库（SQLite，扩展现有 db.py）
+### 4.2 数据库（SQLite，扩展现有 db.py）—— 已按实现对齐(2026-10-20)
 
 ```
-ec_cell        (id, project_id, name, source_path, active_mass_mg, format, qa_json, imported_at)
-ec_cycle       (id, cell_id, cycle_index, kind[formation|normal|checkup], rate_c,
-                q_charge, q_discharge, ce, cv_fraction, v_min, v_max, flags)
-ec_curve       (id, cell_id, cycle_id, direction, dv_mv, v_grid BLOB, dqdv BLOB, params_json)
-ec_peak        (id, cell_id, cycle_id, direction, window_key, pos_v, height, area_q, fwhm, track_id)
-ec_track       (id, cell_id, window_key, direction, label, first_cycle, last_cycle, status)
-ec_attribution (id, cell_id, method[A|B], cycle_index, total, polarization, material, cutoff, confidence, params_json)
+ec_cells      (id, sample_id, name, original_filename, source_path, stored_path,
+               file_hash, format, active_mass_mg, meta_json, imported_at,
+               created_at, updated_at, deleted_at)      -- 软删除与 datasets 一致
+ec_cycles     (id, cell_id, cycle_index, q_charge, q_discharge, ce,
+               i_med_charge, i_med_discharge, v_min, v_max,
+               rate_group[main|slow|fast], incomplete)   -- UNIQUE(cell_id, cycle_index)
+ec_analyses   (id, cell_id, kind[dqdv|attribution], params_json, params_hash,
+               result_json, is_active, created_at, updated_at)
 ```
+
+原计划的 `ec_curve`/`ec_peak`/`ec_track`/`ec_attribution` 四张表**收敛为
+`ec_analyses` 一行一结果**:曲线数组落 `data/<ULID>/dqdv_<hash>.npz`,峰/轨迹/
+归因分量存 `result_json`,按 `params_hash` 判"已过期"。理由:这些结果都是
+"参数 → 一次性计算产物",行级 CRUD 需求不存在,拆表只会让读回要 JOIN 四次。
+圈数、容量、CE 这些**跨圈可聚合**的量仍留在 `ec_cycles`(总览页直接 SQL 聚合)。
 
 ### 4.3 前端（`app/src/features/echem/`）
 

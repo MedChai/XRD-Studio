@@ -1,8 +1,8 @@
 # XRD Studio V0.3 — 项目进度汇报
 
-> **日期：** 2026年09月24日
-> **状态：** 标注持久化 + 高镍无钴识别修正 + 使用缺口批量修复 + 防卡顿优化 已落地
-> **代码基线：** commit `8995df5` + 工作区未提交改动(标注/预设/bounds/导出/性能等)
+> **日期：** 2026年10月20日
+> **状态：** 全量规划修复(引擎数值正确性 + 前端状态机 + 功能补缺 + 2θ/d/Q 视图)+ 打包 已落地
+> **代码基线：** `main` HEAD(本轮提交链见第十六节)
 > **依据文档：** README.md(Rev 2 开发文档)、docs/DEVELOPMENT_HIGH_NI.md、CLAUDE.md
 
 ---
@@ -194,15 +194,18 @@ B1–B12 共 13 个 + 第十二节 B13–B19 共 7 个 + 第十四节 1 个）�
 
 ## 七、下一步计划（按序）
 
-1. **Preset / 参数复用 UI(S5)**——引擎三个命令与 `analysis_presets` 表都在，缺的是入口；这是 README §1.2 的核心场景
-2. **`peaks.update_bounds` 的 Bounds 编辑 UI**——M4 出口条件之一
-3. **前端 Vitest/ESLint 基线**——锁住 preview 取消、Crop 校验、Undo/Redo、导入分组、对比模式等纯逻辑
-4. **SVG / PDF 导出**——README §1.2 S6
-5. **高镍参考样品基线**——支持用户参考样品分布，替代当前仅有的经验提醒阈值
-6. **安装包环境矩阵**（§11.4）——干净 Win10 LTSC、中文用户目录、Defender 开启下过一遍 NSIS 安装包；必要时把 WebView2 从 embedBootstrapper 升到 offlineInstaller
+1. **前端 Vitest/ESLint 基线**——锁住 preview 取消、Crop 校验、Undo/Redo、导入分组、对比模式等纯逻辑
+2. **PDF 导出**——README §1.2 S6 的剩余部分(CSV/PNG/SVG 已可用)
+3. **高镍参考样品基线**——支持用户参考样品分布，替代当前仅有的经验提醒阈值
+4. **灵敏度映射表人工校准**——5–10 张实测谱评审(`CALIBRATION_VERSION` 仍 0.1-initial)
+5. **安装包环境矩阵**（§11.4）——干净 Win10 LTSC、中文用户目录、Defender 开启下过一遍 NSIS 安装包；必要时把 WebView2 从 embedBootstrapper 升到 offlineInstaller
+6. **`material_profiles` UPDATE/DELETE**——「保存档案」现在每次新增重复行
 
 已完成(移出本清单):
 
+- ~~Preset / 参数复用 UI(S5)~~ → Inspector 参数预设区,套用范围可选(第十六节)
+- ~~`peaks.update_bounds` Bounds 编辑 UI~~ → 峰表双击左界/右界
+- ~~SVG 导出~~ → 命令面板「导出当前图表 (SVG)」
 - ~~Sidecar 打包决策实验~~ → 路线 B PyInstaller onedir，NSIS 包已出（`build-installer.bat`）
 - ~~二进制 Envelope 实装~~ → 第十四节
 - ~~结构趋势图~~ → 第十三节
@@ -212,13 +215,12 @@ B1–B12 共 13 个 + 第十二节 B13–B19 共 7 个 + 第十四节 1 个）�
 ## 附：仓库状态速览
 
 ```
-commits:  4(初始 → bugfix → 竞态/基准 → 项目创建)
-engine:   33 py 模块 · 392 tests · ruff clean · ~7.6k 行
-app:      30 tsx/ts/css · tsc zero-error · build passed · ~6.5k 行
-rust:     382 行 · cargo check 零警告
+engine:   37 py 模块 · 465 tests(含 20 条电化学回归钉) · ruff clean
+app:      tsc zero-error · vite build passed
+rust:     cargo check 零警告
 fixtures: 18 个可再生基准文件(seed 20260915,含 cobalt_free_01)
-引擎命令: 30 个(前端实际调用含 presets/bounds/list)
-DB:       SCHEMA_VERSION = 6(幂等迁移,不重建表;v6 加 annotation_json)
+引擎命令: 45 个 _cmd_* 分发方法(含 presets/bounds/list/meta.paths)
+DB:       SCHEMA_VERSION = 7(幂等迁移,不重建表;历史见 CLAUDE.md)
 运行环境: Python 3.14.7 · Rust 1.98.1(MSVC) · Node 24 · Tauri 2.11
 ```
 
@@ -967,3 +969,72 @@ ruff 通过、tsc + vite build 零错误、真实样例回归、NSIS 安装包�
 **验证**:tsc + vite build 零错误、pytest **445 passed**(引擎本轮零改动)、
 ruff 通过、打包版 sidecar 冒烟(导入 184 圈 / 峰519 / 轨迹12 / 重启读回
 hash 一致 / meta.file_path)、NSIS **XRD Studio_0.4.0_x64-setup.exe** 重打。
+
+---
+
+## 十六、本轮(2026-10-19~20)全量规划修复 + 2θ/d/Q 视图 + 打包
+
+对全库审计(3 路并行代码评审 + 逐条实证)发现的问题按
+「引擎数值正确性 → 前端状态机 → 功能缺口 → 文档同步 → 打包」全部落地。
+提交链:`39c6835`(打包前基线)→ `b2f0153`(引擎)→ `1d7d172`(前端状态机)
+→ `e02c912`(功能)→ `0d00aaf`(视图切换)→ 本节(文档)+ 打包。
+
+### 16.1 引擎电化学数值正确性(`b2f0153`,+20 条回归测试 `test_ec_regressions.py`)
+
+LAND 数据这批修复全是"数值错了但看起来正常"的类别:
+
+| 问题 | 根因 | 修法 |
+|---|---|---|
+| CCCV 恒压段容量丢失 | `_integrate_by_cycle` 只积状态 (1,2),CV 段(状态 3)被排除 | 充电段含 (1,3);充放段按**相邻索引**切段(`np.split`),静置不再把两段桥成一段 |
+| 英文状态 "cv" 落到"充电" | `_STATE_MAP` 前缀 "c" 抢在 "cv" 前 | 精确键优先;补裸"充电/放电" |
+| 时间回退处容量腰斩 | `dt≤0` 时丢一个点,q_total 减半 | `dt = where(dt>0, dt, 0)` |
+| Excel 日期序列被当秒用 | 蓝电导出可能存序列日 | 积分前:median dt<1e-3 且 t.max<600 → ×86400;epoch>1e9 相对化 |
+| 列匹配张冠李戴 | 含糊匹配可把两列映到同一物理列 | 三层 exact→prefix→contains,且 `idx not in cols.values()` |
+| 无循环表导入 0 圈 | `_build_cycles` 只在有循环表时跑 | 从记录表也能建圈 |
+| 全废文件当好文件 | 只跳过坏行不报错 | n_rows≥100 且过半失败/全失败 → `LandParseError` |
+| qTotal 算了没人读 | 写进 npz 但结果 index 没带 | `_cmd_ec_dqdv_result` 回读 `index`;容量计入 CV(cap codes (1,3)) |
+| 归因质量单位不一致 | 峰侧 mg、归因侧 g 混用 | 统一 `mass_mg`(cell 活性质量兜底) |
+| 损坏归因显示 computed:true | 读失败仍返回成功形态 | `{"computed": false, "corrupt": true}`;陈旧 npz 删除 |
+| 倍率分组 main 含 fast | 兜底条件漏排除 | main 不含 fast;窗口选择 `window_keys` 优先 H1H2/H2H3;无法拆分如实说"无法拆分" |
+
+`pyproject.toml` 抬到 `numpy>=2.0`(`np.trapezoid` 是 2.0+ API)。
+
+### 16.2 前端状态机与 mock 对齐(`1d7d172`)
+
+- `clearDataset` 清 `_commitTimer`/`_previewTimer` 并递增 `_previewSeq` ——
+  「拖滑块后立刻切数据集」时,旧 preview/commit 迟到会写进新数据集。
+- commit 回调带 `commitSeq` 守卫;commit 失败 toast(此前静默卡"保存中");
+  无数据集时不再进 previewing。
+- `detectPeaks` 在 await 前快照 pipeline;`selectDataset` 自动解析 sampleId。
+- `NumberField` 草稿态:清空输入框不再被 clamp 成 0。
+- mock 补齐:`samples.create`、删峰、三态标注(mockStoredPeaks + 双峰
+  ambiguous)、`meta.paths`;`CurvePayload.x/y` 与引擎同为 Float32Array。
+
+### 16.3 功能补缺(`e02c912`)
+
+- **未归属峰提示**:Inspector 显示"存在 N 个未归属峰 —— 没标≠没有杂相"。
+- **导入问采集坐标与波长**(`x_axis_type`/`wavelength`):非 Cu 靶不再静默错位。
+- **Settings 数据页**(`meta.paths`):数据存哪了、日志在哪,一键打开。
+- **参数预设套用范围可选**:当前/所选/整项目,不再固定整项目误改全部。
+- **批量导出**:整项目峰表+处理后数据 CSV(图不进批量,前端逐数据集渲)。
+- **主题切换看生效态**:`theme=system` 时按实际生效主题显示切换目标。
+
+### 16.4 视图 2θ/d/Q 切换(`0d00aaf`,README §4.1)
+
+- 纯显示层:`app/src/services/coords.ts` 镜像引擎 `coords.py`(改一边同步
+  另一边);Display 区切换,刻度/tooltip/状态栏/峰标签全部随视图。
+- **峰表与 zoom 永远按采集轴**(§4.1 避免结果歧义);峰表列头标采集轴
+  (d/q 导入的数据列头不再写死"2θ")。
+- d 轴取文献方向(大 d 在左,峰序与 2θ 视图一致):内部映射负 d,
+  刻度/读数取绝对值,绕开 ECharts inverse 轴与 dataZoom 的历史坑。
+- generic 采集轴无换算定义,切换器禁用并说明。
+
+### 16.5 文档同步 + 打包
+
+- CLAUDE.md:SCHEMA_VERSION 7、打包路线(PyInstaller onedir)、未归属提示
+  已上线、显示层视图切换约定;coords.py 头注补前端镜像关系。
+- PLAN_ECHEM:命令表/表结构按实现对齐(ec.preview/import/…、
+  ec_cells/ec_cycles/ec_analyses 收敛)。
+- README §8.1:层级补 Batch(可选层,同名复用)。
+- **全量验证**:pytest **465 passed** · ruff 零告警 · tsc 零错误 · vite build 通过。
+- `build-installer.bat` → PyInstaller onedir sidecar + NSIS 安装包。

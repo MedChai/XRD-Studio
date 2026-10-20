@@ -416,10 +416,16 @@ Advanced(折叠区):Prominence / Width / Relative Height 直通。映射表在 `
 ## 8.1 层级
 
 ```text
-Workspace └ Project ─┬─ Sample ─┬─ Dataset ─── Analysis ─── Peaks
-                     │          └─ Dataset
+Workspace └ Project ─┬─ Sample ─┬─ Batch(可选) ─┬─ Dataset ─── Analysis ─── Peaks
+                     │          │                └─ Dataset
+                     │          └─ Dataset ─── Analysis ─── Peaks
                      └─ AnalysisPreset(项目级,新增)
 ```
+
+批次是**可选层**:导入时"批次"留空就不建,数据集直接挂实验下 —— 不强迫
+用户维护一个他不需要的层级。同名批次按 `sample_id + name` **复用**,分两次
+导入同一批文件不会得到两个看不出区别的同名组。电化学 cell(`ec_cells`)与
+Dataset 同层,直接挂 Sample,见 docs/DEVELOPMENT_EC.md。
 
 ## 8.2 SQLite 表(`xrdstudio.db`)
 
