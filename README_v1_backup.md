@@ -2242,42 +2242,6 @@ PDF
 
 ---
 
-# 76. V0.3 不做
-
-明确排除：
-
-```text
-Rietveld Refinement
-
-ICDD PDF Database
-
-Automatic Phase Identification
-
-Complex CIF Management
-
-Cell Refinement
-
-Multi-Peak Deconvolution
-
-Instrument Broadening Calibration
-
-Kα2 Stripping
-
-Automatic Crystallite Size Workflow
-
-Automatic Crystallinity Analysis
-
-Cloud Sync
-
-Account System
-
-Multi-user Collaboration
-```
-
-这些以后再做。
-
----
-
 # 77. V0.3 Success Flow
 
 用户应该能够做到：
