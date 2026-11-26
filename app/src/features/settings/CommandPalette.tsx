@@ -123,9 +123,9 @@ export function CommandPalette() {
           const list = samples
             .filter((s) => s.project_id === projectId)
             .flatMap((s) => [
-              ...s.datasets.map((d) => ({ id: d.id, name: d.name })),
+              ...s.datasets.map((d) => ({ id: d.id, name: d.name, sampleName: s.name })),
               ...s.batches.flatMap((b) =>
-                b.datasets.map((d) => ({ id: d.id, name: `${b.name}_${d.name}` })),
+                b.datasets.map((d) => ({ id: d.id, name: d.name, sampleName: s.name })),
               ),
             ]);
           if (list.length === 0) {

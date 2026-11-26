@@ -171,7 +171,7 @@ export function PeakDrawer() {
                   onClick={() => setSelectedPeak(p.index)}
                 >
                   <td className="tabular px-3 py-1 text-[var(--text-tertiary)]">{p.index + 1}</td>
-                  <td className="tabular px-3 py-1">{p.position.toFixed(3)}°</td>
+                  <td className="tabular px-3 py-1">{p.position.toFixed(curve?.xAxisType === "d" || curve?.xAxisType === "q" ? 4 : 3)}</td>
                   <td className="px-3 py-1 text-[var(--text-primary)]">
                     {p.hkl ? (
                       <span

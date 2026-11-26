@@ -1,8 +1,6 @@
 /** 状态栏(§15):光标读数、点数、保存状态。
  *
- *  电化学模式(cellId 非空)整栏换成模式标签:光标、XRD 点数/
- *  峰固化徽标、谱图管线状态全是谱图语境,selectCell 不清 analysisStore,
- *  留着会显示上一张谱图的残值,只会误导。
+ *  CEX 工作区显示蓝电模式，谱图状态随 XRD 工作区显示。
  *
  *  光标 x 存的是**显示坐标**(与图上轴一致),读数格式与图表 tooltip
  *  共用 formatAxisReadout —— 两处显示不同读数会让人怀疑哪个是真的。
@@ -19,16 +17,16 @@ export function StatusBar() {
   const crosshair = usePlotStore((s) => s.crosshair);
   const cursor = usePlotStore((s) => s.cursor);
   const xView = usePlotStore((s) => s.xView);
-  const cellId = useSelectionStore((s) => s.cellId);
+  const cexActive = useSelectionStore((s) => s.cexActive);
   const view: XDisplay = curve && curve.xAxisType === "generic" ? "generic" : xView;
 
-  if (cellId != null) {
+  if (cexActive) {
     return (
       <footer
         className="blur-surface flex shrink-0 items-center gap-4 border-t border-[var(--divider)] bg-[var(--bg-sidebar)] px-3 text-[11px] text-[var(--text-secondary)]"
         style={{ height: "var(--statusbar-h)" }}
       >
-        <span>{t.status.ecMode}</span>
+        <span>蓝电原始数据</span>
         <span className="flex-1" />
       </footer>
     );
@@ -67,7 +65,7 @@ export function StatusBar() {
           ? t.status.saved
           : status === "committing"
             ? t.status.saving
-            : t.status.computing}
+            : status === "unsaved" ? t.status.unsaved : t.status.computing}
       </span>
     </footer>
   );

@@ -1,5 +1,7 @@
 # XRD Studio 电化学模块（dQ/dV 衰减归因分析）计划书
 
+本页记录历史 LAND 表格方案。现行蓝电 CEX 入口和 dQ/dV 实现见[开发文档](./DEVELOPMENT_EC.md)。
+
 - **日期**：2026-10-05
 - **状态**：待确认（确认后按 M0→M5 顺序开工）
 - **目标平台**：XRD Studio（Tauri 2 + React 前端 / Python sidecar 引擎），集成现有项目与数据管理

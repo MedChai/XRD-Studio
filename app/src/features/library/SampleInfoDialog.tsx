@@ -14,7 +14,7 @@ import { useEffect, useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import { Button } from "../../components/controls";
 import { engineCommand } from "../../services/engine";
-import { useProjectStore, useUiStore } from "../../stores";
+import { useAnalysisStore, useProjectStore, useSelectionStore, useUiStore } from "../../stores";
 import { t } from "../../i18n";
 
 /** 字段定义:key 与引擎 `samples.update` 的参数名一一对应。
@@ -64,6 +64,7 @@ export function SampleInfoDialog() {
         return;
       }
     }
+    const oldWavelength = useProjectStore.getState().samples.find((s) => s.id === target.id)?.wavelength;
     setBusy(true);
     const payload: Record<string, unknown> = {
       id: target.id,
@@ -84,6 +85,10 @@ export function SampleInfoDialog() {
     showToast("success", t.sample.saved);
     setTarget(null);
     await load();
+    const active = useAnalysisStore.getState();
+    if (lamRaw && Number(lamRaw) !== oldWavelength && useSelectionStore.getState().sampleId === target.id && active.loadedDatasetId != null) {
+      await active.loadDataset(active.loadedDatasetId);
+    }
   }
 
   const labels: Record<string, string> = {

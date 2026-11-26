@@ -18,6 +18,7 @@ Sensitivity 到 find_peaks 参数的映射表在本模块固化。这张表的�
 
 from __future__ import annotations
 
+from bisect import bisect_left
 from dataclasses import dataclass
 
 import numpy as np
@@ -255,6 +256,7 @@ def detect_peaks(
     x: np.ndarray,
     y: np.ndarray,
     params: PeakDetectionParams,
+    *, angles: np.ndarray | None = None,
 ) -> tuple[list[Peak], DetectionDiagnostics]:
     """在曲线 y(x) 上检测峰,返回峰列表与诊断信息。
 
@@ -273,6 +275,8 @@ def detect_peaks(
     x_step = float(np.median(np.diff(x_arr))) if x_arr.size > 1 else 0.0
     kwargs, diag = build_detection_kwargs(y_arr, x_step, params)
 
+    if angles is not None:
+        kwargs["distance"] = 1  # Actual angular distances vary along a uniform d or Q grid.
     indices, properties = find_peaks(y_arr, **kwargs)
     diag.raw_count = int(indices.size)
 
@@ -280,6 +284,21 @@ def detect_peaks(
         return [], diag
 
     prominences = properties.get("prominences", np.zeros(indices.size))
+
+    if angles is not None:
+        keep = np.ones(indices.size, dtype=bool)
+        accepted: list[float] = []
+        for candidate in np.argsort(-y_arr[indices], kind="stable"):
+            angle = float(angles[indices[candidate]])
+            if not np.isfinite(angle) or angle <= 0:
+                continue  # Keep native-axis peaks outside the observable angular range unindexed.
+            slot = bisect_left(accepted, angle)
+            neighbors = accepted[max(0, slot - 1):slot + 1]
+            if any(abs(other - angle) < params.min_distance_deg for other in neighbors):
+                keep[candidate] = False
+            else:
+                accepted.insert(slot, angle)
+        indices, prominences = indices[keep], prominences[keep]
 
     peaks: list[Peak] = []
     for order, idx in enumerate(indices):

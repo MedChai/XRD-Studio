@@ -44,7 +44,6 @@
   /* ---- 布局尺寸 ---- */
   --topbar-h: 52px;
   --statusbar-h: 28px;
-  --sidebar-w: 248px;
   --inspector-w: 296px;
 
   /* ---- 图表 ---- */
@@ -205,4 +204,42 @@ body {
 }
 [data-theme="dark"] .slider-thumb {
   background: #e8e8ea;
+}
+
+.pane-divider {
+  position: relative;
+  z-index: 1;
+  background: var(--divider);
+}
+
+.pane-divider[aria-orientation="vertical"] {
+  width: 1px;
+  cursor: col-resize;
+}
+
+.pane-divider[aria-orientation="horizontal"] {
+  height: 1px;
+  cursor: row-resize;
+}
+
+.pane-divider:is(:hover, :focus-visible, [data-separator="hover"], [data-separator="active"]) {
+  background: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+  outline: none;
+}
+
+.cex-input {
+  min-width: 0;
+  height: 28px;
+  padding-inline: 8px;
+  border: 1px solid var(--divider);
+  border-radius: var(--radius-control);
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.cex-input:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
 }

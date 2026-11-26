@@ -66,7 +66,7 @@ def analyze_high_ni(
     """
     profile = profile or default_profile(curve.wavelength)
     requested = set(modules)
-    x, y, warnings = _as_two_theta(curve)
+    x, y, warnings = as_two_theta(curve)
     if x.size < 20:
         return _empty_result(
             dataset_id, profile_id, source_hash,
@@ -145,19 +145,23 @@ def _empty_result(
     }
 
 
-def _as_two_theta(curve: Curve) -> tuple[np.ndarray, np.ndarray, list[str]]:
+def as_two_theta(curve: Curve) -> tuple[np.ndarray, np.ndarray, list[str]]:
+    """Return increasing angular samples for window analysis and profile fitting."""
     if curve.x_axis_type == "two_theta":
         return curve.x, curve.y, []
-    if curve.x_axis_type in ("d", "q"):
-        try:
-            converted = convert(curve.x, curve.x_axis_type, "two_theta", curve.wavelength)
-            order = np.argsort(converted)
-            return converted[order], curve.y[order], []
-        except ValueError as exc:
-            return curve.x, curve.y, [f"x 轴无法换算为 2θ: {exc}"]
-    return curve.x, curve.y, [
-        f"当前 x 轴为 {curve.x_axis_type},无法按 2θ 峰窗进行高镍分析"
-    ]
+    if curve.x_axis_type not in ("d", "q"):
+        return np.array([]), np.array([]), ["采集轴无法换算为 2θ"]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        angles = convert(curve.x, curve.x_axis_type, "two_theta", curve.wavelength)
+    valid = np.isfinite(angles) & (angles > 0)
+    x, y = angles[valid], curve.y[valid]
+    warnings = [] if valid.all() else ["已排除超出波长可观测范围的点"]
+    if x.size < 2:
+        return x, y, warnings
+    if x[0] > x[-1]:
+        x, y = x[::-1], y[::-1]
+    grid = np.linspace(x[0], x[-1], x.size)
+    return grid, np.interp(grid, x, y), warnings
 
 
 def _window_data(

@@ -25,7 +25,7 @@ export type RowContextOpen = (e: ReactMouseEvent, target: RowContextTarget) => v
 
 /** 预估菜单尺寸,用于贴边时不溢出视口。 */
 const MENU_W = 176;
-const MENU_H = 150;
+const MENU_H = 194;
 
 /** 右键菜单的开合状态。放在持有行列表的组件(LibrarySidebar)里。 */
 export function useRowContextMenu(): {
@@ -81,9 +81,11 @@ export function useRowContextMenu(): {
 export function RowContextMenu({
   state,
   onClose,
+  onAddCex,
 }: {
   state: Anchored | null;
   onClose: () => void;
+  onAddCex: (sampleId: number) => void;
 }) {
   if (!state) return null;
   return createPortal(
@@ -97,6 +99,7 @@ export function RowContextMenu({
         id={state.id}
         name={state.name}
         onClose={onClose}
+        onAddCex={state.table === "samples" ? () => onAddCex(state.id) : undefined}
       />
     </div>,
     document.body,

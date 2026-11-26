@@ -112,6 +112,7 @@ export interface AnnotationLabel {
 
 /** peaks.annotate 的返回体(与引擎 _cmd_peaks_annotate 对齐)。 */
 export interface PeaksAnnotateResult {
+  peaks: PeakResult[];
   annotated: {
     index: number;
     position: number;
@@ -303,6 +304,7 @@ export interface SampleNode {
   wavelength: number | null;
   notes: string;
   dataset_count: number;
+  electrochem_count?: number;
   datasets: DatasetNode[];
   batches: BatchNode[];
 }
@@ -412,212 +414,18 @@ export interface MetaFilePathResult {
   kind: "source" | "stored";
 }
 
-// ---------- 电化学(LAND dQ/dV 衰减归因) ----------
-
-/** ec.import 归属的电化学数据(一个 LAND 文件 = 一颗电池)。 */
-export interface EcCellSummary {
+/** 已归档到样品的蓝电 CEX。 */
+export interface CexCellSummary {
   id: number;
   name: string;
   filename: string;
   massMg: number | null;
-  format: string;
   cycleCount: number;
-  lastCycle: number | null;
-  importedAt: string;
 }
 
-/** ec.cell_overview 的单圈统计(与 ec_cycles 表一致,驼峰)。 */
-export interface EcCycleRow {
-  cycle: number;
-  qCharge: number;
-  qDischarge: number;
-  ce: number;
-  iMedCharge: number;
-  vMin: number;
-  vMax: number;
-  rateGroup: "main" | "slow" | "fast";
-  incomplete: boolean;
-}
-
-export interface EcSessionInfo {
-  test_name: string;
-  channel: string;
-  start_time: string;
-  end_time: string;
-  /** 测试流程表的工步描述原文 */
-  program: string[];
-}
-
-export interface EcCellOverview {
-  id: number;
-  name: string;
-  filename: string;
-  massMg: number | null;
-  session: EcSessionInfo;
-  qa: Record<string, unknown>;
-  cycles: EcCycleRow[];
-}
-
-/** ec.preview 的 dry-run 结果(圈统计是蛇形命名,与引擎一致)。 */
-export interface EcPreviewCycle {
-  index: number;
-  q_charge: number;
-  q_discharge: number;
-  ce: number;
-  rate_group: "main" | "slow" | "fast";
-  incomplete: boolean;
-}
-
-export interface EcPreviewResult {
-  file: string;
-  session: EcSessionInfo;
-  qa: Record<string, unknown>;
-  n_cycles: number;
-  cycles_preview: EcPreviewCycle[];
-  mass_mg_estimate: number | null;
-}
-
-export interface EcImportResult {
-  imported: { id: number; name: string; n_cycles: number }[];
-  duplicates: { path: string; cellId: number; name: string }[];
-  failures: { path: string; reason: string }[];
-  sampleId: number;
-}
-
-/** 单圈单方向检出的一个峰(ec.dqdv_compute 的 peaks 元素)。 */
-export interface EcPeakRow {
-  cycle: number;
-  direction: "charge" | "discharge";
-  window: string;
-  position: number;
-  height: number;
-  area: number;
-  fwhm: number;
-  prominence: number;
-  onset: number | null;
-  /** 半高交叉在数据内缺失(充电截止把峰切了一侧) */
-  truncated: boolean;
-  trackId: number | null;
-}
-
-export interface EcTrackRow {
-  trackId: number;
-  direction: "charge" | "discharge";
-  window: string;
-  label: string;
-  firstCycle: number;
-  lastCycle: number;
-  nPeaks: number;
-  continuity: number;
-}
-
-/** dQ/dV 分析的明细:计算返回与跨会话读回(ec.dqdv_result)共用。 */
-export interface EcDqdvDetail {
-  nCurves: number;
-  nPeaks: number;
-  nTruncated: number;
-  peaks: EcPeakRow[];
-  tracks: EcTrackRow[];
-  paramsHash: string;
-}
-
-/** ec.dqdv_compute 的返回(明细 + 曲线缓存文件名)。 */
-export interface EcDqdvComputeResult extends EcDqdvDetail {
-  curveFile: string;
-}
-
-/** 引擎落库的完整参数快照(dqdv 基础参数 + 峰检测窗口/配置)。
- *  UI 只暴露基础子集,extras 原样读回即可 —— 重算时缺省会由引擎补默认。 */
-export interface EcStoredDqdvParams extends EcDqdvParams {
-  windows?: { key: string; label: string; v_lo: number; v_hi: number }[];
-  peak?: Record<string, unknown>;
-}
-
-/** ec.dqdv_result 的返回:读回上次固化的峰/轨迹/参数,重启后免重算。 */
-export type EcDqdvResult =
-  | { computed: false; corrupt?: boolean }
-  | ({
-      computed: true;
-      params: EcStoredDqdvParams;
-      updatedAt: string;
-    } & EcDqdvDetail);
-
-export type EcDqdvState =
-  | { computed: false }
-  | { computed: true; paramsHash: string; updatedAt: string };
-
-/** ec.dqdv_curve 的返回。v / dqdv 是 Float32Array(二进制信封解码)。 */
-export interface EcCurvePayload {
-  cycle: number;
-  direction: "charge" | "discharge";
-  pointCount: number;
-  paramsHash: string;
-  v: Float32Array;
-  dqdv: Float32Array;
-}
-
-/** ec.dqdv_waterfall 的返回。matrix 为行优先展平的 rows×cols,NaN 表示
- *  该圈该电压无数据;v 走 JSON(信封要求等长数组,矩阵与 v 轴长度不同)。 */
-export interface EcWaterfallPayload {
-  cycles: number[];
-  direction: "charge" | "discharge";
-  step: number;
-  shape: [number, number];
-  v: number[];
-  matrix: Float32Array;
-  paramsHash: string;
-}
-
-/** 归因的逐圈分量(mAh/g,三者之和 = total)。 */
-export interface EcAttributionCycle {
-  cycle: number;
-  total: number;
-  polarization: number;
-  material: number;
-  cutoff: number;
-}
-
-export interface EcAttributionResult {
-  method: "A" | "B";
-  confidence: "high" | "low";
-  baseline: number;
-  nCycles: number;
-  lastCycle: number | null;
-  lastTotal: number | null;
-  cycles: EcAttributionCycle[];
-  ceSeries: [number, number][];
-  cumulativeIrreversible: [number, number][];
-  truncatedEvidence: {
-    available: boolean;
-    nTruncatedCycles?: number;
-    nFullCycles?: number;
-    firstPosition?: number;
-    lastPosition?: number;
-    driftV?: number;
-  };
-  notes: string[];
-  conclusion: string;
-  sourceDqdvHash?: string;
-}
-
-/** ec.attribution_get 的返回:未算过 / 已算(带 stale 标记)。 */
-export type EcAttributionState =
-  | { computed: false }
-  | ({ computed: true; stale: boolean; updatedAt: string } & EcAttributionResult);
-
-export interface EcExportResult {
-  path: string;
-  rows: number;
-}
-
-/** dQ/dV 计算参数(引擎 DQDVParams 的可传子集)。 */
-export interface EcDqdvParams {
-  dv_mv?: number;
-  sg_window?: number;
-  sg_poly?: number;
-  v_min?: number;
-  v_max?: number;
-  mass_mg?: number | null;
+export interface CexLibraryListing {
+  cells: CexCellSummary[];
+  historyCount: number;
 }
 
 // ---------- 响应封装 ----------

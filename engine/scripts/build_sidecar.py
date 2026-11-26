@@ -110,7 +110,9 @@ def build(dist_root: Path, work_root: Path) -> Path:
 
     # 镜像到 target/release:start.bat 的 run 模式直接开裸 release exe,
     # 不走 NSIS 安装目录,靠 lib.rs「与主程序同目录找 xrd-engine.exe」。
-    release_dir = root / "app" / "src-tauri" / "target" / "release"
+    tauri_root = root / "app" / "src-tauri"
+    target_root = tauri_root / (os.environ.get("CARGO_TARGET_DIR") or "target")
+    release_dir = target_root / "release"
     if release_dir.is_dir():
         shutil.copy2(exe_out, release_dir / "xrd-engine.exe")
         dest_internal = release_dir / "_internal"

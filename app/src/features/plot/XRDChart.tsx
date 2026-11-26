@@ -24,13 +24,15 @@ import {
   formatAxisReadout,
   formatAxisValue,
   fromDisplayX,
-  toDisplayX,
+  orderedRange, toDisplayX,
   type XDisplay,
 } from "../../services/coords";
 
 interface Props {
   onPeakClick?: (index: number) => void;
 }
+
+export const XRD_PLOT_INSETS = { left: 52, right: 20 };
 
 function cssVar(name: string): string {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -301,10 +303,10 @@ function XRDChartInner({ onPeakClick }: Props) {
         // 写 store。key 与 zoom 回放 effect 同构(view 前缀),否则切换视图
         // 后同值短路会失效/误触发。
         const { view: v, nativeAxis: nat, wavelength: lam } = currentConv();
-        const next = {
-          from: fromDisplayX(dz.startValue, v, nat, lam),
-          to: fromDisplayX(dz.endValue, v, nat, lam),
-        };
+        const range = orderedRange(fromDisplayX(dz.startValue, v, nat, lam),
+          fromDisplayX(dz.endValue, v, nat, lam));
+        if (!range) return;
+        const next = { from: range[0], to: range[1] };
         appliedZoom.current = `${v}:${JSON.stringify(next)}`; // 标记为本图自己产生的
         usePlotStore.getState().setZoom(next);
       });
@@ -332,13 +334,16 @@ function XRDChartInner({ onPeakClick }: Props) {
   useEffect(() => {
     const chart = chartRef.current;
     if (!chart) return;
+    const displayDomain = xDomain && orderedRange(
+      toDisplayX(xDomain[0], view, nativeAxis, wavelength), toDisplayX(xDomain[1], view, nativeAxis, wavelength),
+    );
     chart.setOption(
       {
         animation: false,
         backgroundColor: "transparent",
         // top 留 36px:y 轴标题 + 最高峰标签(distance 6 + 字号 10)。
         // 配合 yAxis.max 顶部余量,标签不会再被 container overflow:hidden 裁掉。
-        grid: { top: 36, bottom: 34, left: 52, right: 20 },
+        grid: { top: 36, bottom: 34, ...XRD_PLOT_INSETS },
         tooltip: {
           show: crosshair,
           trigger: "axis",
@@ -375,9 +380,8 @@ function XRDChartInner({ onPeakClick }: Props) {
           type: "value",
           // x 值域必须从数据推导。此前硬编码 min:10/max:80,任何不在
           // 10–80° 的实测谱都会被裁掉,而且 Fit All 也无从谈起。
-          // 换算到显示坐标后仍单调,from/to 直接映射到 min/max。
-          min: xDomain ? toDisplayX(xDomain[0], view, nativeAxis, wavelength) : undefined,
-          max: xDomain ? toDisplayX(xDomain[1], view, nativeAxis, wavelength) : undefined,
+          min: displayDomain?.[0],
+          max: displayDomain?.[1],
           axisLine: { lineStyle: { color: cssVar("--plot-axis") } },
           axisTick: { show: false },
           splitLine: { show: false },
@@ -508,11 +512,14 @@ function XRDChartInner({ onPeakClick }: Props) {
     const target = zoom ?? { from: xDomain[0], to: xDomain[1] };
     const key = `${view}:${JSON.stringify(target)}`;
     if (key === appliedZoom.current) return;
+    const range = orderedRange(toDisplayX(target.from, view, nativeAxis, wavelength),
+      toDisplayX(target.to, view, nativeAxis, wavelength));
+    if (!range) return;
     appliedZoom.current = key;
     chart.dispatchAction({
       type: "dataZoom",
-      startValue: toDisplayX(target.from, view, nativeAxis, wavelength),
-      endValue: toDisplayX(target.to, view, nativeAxis, wavelength),
+      startValue: range[0],
+      endValue: range[1],
     });
   }, [zoom, xDomain, view, nativeAxis, wavelength]);
 

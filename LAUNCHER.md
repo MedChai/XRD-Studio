@@ -4,7 +4,7 @@
 
 | 文件 | 用途 |
 |---|---|
-| `start.bat` | **日常启动**。自动选择最快的方式：有打包好的版本就直接开，没有就退回开发模式（首次会编译，几分钟） |
+| `start.bat` | **日常启动**。优先打开版本号最高的完整本地发布版，找不到发布版时进入开发模式 |
 | `stop.bat` | **一键关闭**。结束应用 + Vite + Python 分析引擎。没在运行时双击也无害 |
 | `start-dev.bat` | **改代码时启动**。强制走 `npm run tauri dev`，带热重载，即使已有打包版本也走开发模式 |
 
@@ -54,19 +54,18 @@ grep -n '[^ -~]' _launcher.ps1    # 应当没有任何输出
 
 ### 进程识别方式
 
-- **应用**：按**路径**匹配 `app/src-tauri/target/**` 下的 `app.exe` / `xrd-engine.exe`，
-  永远不会误伤别的项目。
+- **应用**：按路径匹配 `app/src-tauri/target/` 和 `XRDStudio/releases/` 下本项目的主程序与分析引擎。
 - **Python 引擎**：按命令行匹配 `xrd_engine`（venv 的 `python.exe` 在 Python 3.14 下
   会再拉起一个 base 解释器子进程，所以正常状态下你会看到两个 python 进程，这不是 bug）。
 - **进程树**：`start` 时把根进程 PID 连同**启动时间**一起写进
-  `%LOCALAPPDATA%\XRDStudio\logs\launcher.pid`；`stop` 时比对启动时间，
+  `%ROOT%\XRDStudio\logs\launcher.pid`；`stop` 时比对启动时间，
   避免 Windows 复用 PID 导致误杀无关进程树。
 - **开发端口**：开发启动前检查 `1420` 的 IPv4/IPv6 监听。能确认属于本项目的
   残留 Vite/Node 进程会自动清理；无法确认归属时只显示 PID、进程名和命令行，
   不会自动结束别的程序。
 - **启动日志**：Tauri/npm 的标准输出和错误分别写入
-  `%LOCALAPPDATA%\XRDStudio\logs\tauri.stdout.log` 与
-  `%LOCALAPPDATA%\XRDStudio\logs\tauri.stderr.log`。启动失败时，启动器会直接
+  `%ROOT%\XRDStudio\logs\tauri.stdout.log` 与
+  `%ROOT%\XRDStudio\logs\tauri.stderr.log`。启动失败时，启动器会直接
   打印错误日志末尾内容。
 
 ## 打包安装包（给别的电脑用）
@@ -100,6 +99,4 @@ engine\.venv\Scripts\python.exe -m pip install -e "engine[dev,packaging]"
 
 - 启动器所在的路径**不能含 `&`**（`_common.bat` 用 `for /f` 调 `where` 定位工具，
   未加引号会歧义）。当前路径 `D:\XRD自动解析软件` 没问题。
-- 本地免安装跑 release：`target\release\` 下已有 `XRD Studio.exe` + sidecar，
-  `start.bat` 会自动识别；改引擎代码后需重跑 `engine\scripts\build_sidecar.py`
-  或 `build-installer.bat` 刷新 sidecar。
+- 本地发布版可放在 `XRDStudio/releases/<版本号>/`，包含 `XRD Studio.exe`、`xrd-engine.exe` 和 `_internal/`。`start.bat` 会比较此目录、本地构建目录和当前用户安装目录中的完整版本，并继续使用项目的 `XRDStudio/library/` 数据库。

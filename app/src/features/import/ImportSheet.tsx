@@ -35,7 +35,7 @@ export function ImportSheet() {
   // 采集坐标轴与波长:导入时就要问 —— Co/Fe 靶数据按默认 Cu 1.5418 入库后,
   // d/Q 换算与晶面标注会静默错位,事后才发现全错(§7.2 宁问不猜错)。
   const [axisType, setAxisType] = useState<"two_theta" | "d" | "q">("two_theta");
-  const [wavelength, setWavelength] = useState("1.5418");
+  const [wavelength, setWavelength] = useState("");
   /** 文件夹扫描的建议分组(确认前不落库) */
   const [scan, setScan] = useState<ScanResult | null>(null);
   const [busy, setBusy] = useState(false);
@@ -65,6 +65,11 @@ export function ImportSheet() {
     () => allSamples.filter((x) => x.project_id === project),
     [allSamples, project],
   );
+
+  const inheritedWavelength = destMode === "existing"
+    ? projectSamples.find((sample) => sample.id === destSampleId)?.wavelength ?? 1.5418
+    : 1.5418;
+  const wavelengthPayload = wavelength.trim() ? { wavelength: Number(wavelength) } : {};
 
   // 拖放进来的文件路径(AppShell 写入)自动填入
   useEffect(() => {
@@ -136,6 +141,10 @@ export function ImportSheet() {
 
   async function confirmScan() {
     if (!scan || project == null) return;
+    if (wavelength.trim() && !(Number(wavelength) >= 0.3 && Number(wavelength) <= 3)) {
+      showToast("error", t.sample.wavelengthInvalid);
+      return;
+    }
     setBusy(true);
     let imported = 0;
     let failed = 0;
@@ -145,10 +154,10 @@ export function ImportSheet() {
       const r = await engineCommand<ImportResult>("datasets.import", {
         paths: group.paths,
         project_id: project,
-        new_sample: { name: group.name, wavelength: Number(wavelength) || 1.5418 },
+        new_sample: { name: group.name, ...wavelengthPayload },
         batch_source_path: scan.folder,
         x_axis_type: axisType,
-        wavelength: Number(wavelength) || 1.5418,
+        ...wavelengthPayload,
       });
       if (!r.ok) {
         failed += group.paths.length;
@@ -230,6 +239,10 @@ export function ImportSheet() {
       useUiStore.getState().setNewProjectOpen(true);
       return;
     }
+    if (wavelength.trim() && !(Number(wavelength) >= 0.3 && Number(wavelength) <= 3)) {
+      showToast("error", t.sample.wavelengthInvalid);
+      return;
+    }
     setBusy(true);
     // 归属三选一。**已有实验这条路此前完全缺失** —— 引擎本来就支持传
     // sample_id 复用样品,只是前端从来不传,于是每次导入都新建一个。
@@ -240,7 +253,7 @@ export function ImportSheet() {
         : {
             new_sample: {
               name: newSampleName || t.import.defaultSampleName,
-              wavelength: Number(wavelength) || 1.5418,
+              ...wavelengthPayload,
             },
           };
     const batch = batchName.trim() ? { batch_name: batchName.trim() } : {};
@@ -251,7 +264,7 @@ export function ImportSheet() {
       ...destination,
       ...batch,
       x_axis_type: axisType,
-      wavelength: Number(wavelength) || 1.5418,
+      ...wavelengthPayload,
       ...(mapping ? { x_column: (xColumn ?? mapX) - 1, y_column: (yColumn ?? mapY) - 1 } : {}),
       ...(importAnyway ? { import_anyway: true } : {}),
     });
@@ -531,7 +544,7 @@ export function ImportSheet() {
                   <input
                     value={wavelength}
                     onChange={(e) => setWavelength(e.target.value)}
-                    placeholder="1.5418"
+                    placeholder={String(inheritedWavelength)}
                     title={t.import.wavelengthHint}
                     className="w-20 rounded-[var(--radius-input)] border border-[var(--divider)] bg-[var(--bg-panel)] px-2 py-1 text-right text-[12px] tabular focus:border-[var(--accent)] focus:outline-none"
                   />

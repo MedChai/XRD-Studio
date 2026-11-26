@@ -41,6 +41,7 @@ from dataclasses import asdict, dataclass
 
 import numpy as np
 
+from ..coords import convert
 from ..models.types import (
     Curve,
     PipelineParams,
@@ -251,7 +252,11 @@ def run_pipeline(
     peaks = []
     if params.peaks is not None and x.size >= 3:
         try:
-            peaks, _diag = detect_peaks(x, y_metric, params.peaks)
+            angles = None
+            if working.x_axis_type in ("d", "q"):
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    angles = convert(x, working.x_axis_type, "two_theta", working.wavelength)
+            peaks, _diag = detect_peaks(x, y_metric, params.peaks, angles=angles)
         except Exception as exc:
             raise PipelineError(
                 reason=f"寻峰失败:{exc}", stage="peaks", detail=type(exc).__name__

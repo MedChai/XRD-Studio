@@ -39,6 +39,16 @@ def with_dataset(engine, fixtures_dir):
     return engine, pid, sample_id, dataset_id
 
 
+@pytest.fixture
+def layered_dataset(engine, fixtures_dir):
+    pid = engine.handle("projects.create", {"name": "NCM"})["data"]["projectId"]
+    data = engine.handle("datasets.import", {
+        "paths": [str(fixtures_dir / "ncm811_01.xy")], "project_id": pid,
+        "new_sample": {"name": "NCM811"},
+    })["data"]
+    return engine, pid, data["sampleId"], data["imported"][0]["id"]
+
+
 class TestDispatch:
     def test_unknown_command(self, engine):
         r = engine.handle("no.such.cmd", {})
@@ -160,6 +170,15 @@ class TestImport:
         assert len(second["data"]["imported"]) == 1, second["data"]
         # 复用同一个 sample,不再新建
         assert second["data"]["sampleId"] == sample_id
+        dataset_id = second["data"]["imported"][0]["id"]
+        engine.close()
+        reopened = Engine(tmp_path / "store")
+        try:
+            curve = reopened.handle("datasets.curve", {"id": dataset_id})
+            assert curve["ok"] and curve["data"]["pointCount"] == 200
+            assert reopened.handle("export.data", {"dataset_id": dataset_id})["ok"]
+        finally:
+            reopened.close()
 
     def test_mapping_without_sample_is_rejected(self, engine, fixtures_dir):
         """反向确认:第二次调用若丢了 sample_id 又不给 new_sample,必须报错
@@ -689,16 +708,16 @@ class TestAnnotationPersists:
     ③ 重新读回(peaks.list)仍然在 —— 只做 ① 的话重载数据集就丢。
     """
 
-    def test_annotate_returns_and_persists_dominance(self, with_dataset):
-        engine, _pid, _sid, dataset_id = with_dataset
-        det = engine.handle("peaks.detect", {"dataset_id": dataset_id})
+    def test_annotate_returns_and_persists_dominance(self, layered_dataset):
+        engine, _pid, _sid, dataset_id = layered_dataset
+        det = engine.handle("peaks.detect", {"dataset_id": dataset_id, "annotate": True})
         assert det["ok"], det
         peaks = det["data"]["peaks"]
-        assert peaks, "LFP 基准谱应当检出峰"
+        assert peaks, "层状基准谱应当检出峰"
 
         # ① 命令返回值里必须带归属依据
         labeled = [p for p in peaks if p.get("hkl")]
-        assert labeled, "LFP 谱在 R-3m 模型下应有被归属的峰"
+        assert labeled, "层状基准谱应有可归属的峰"
         assert all(p.get("dominance") is not None for p in labeled), (
             "被归属的峰必须带 dominance,否则前端只能显示 0%"
         )
@@ -727,9 +746,9 @@ class TestAnnotationPersists:
         assert back and all(p["dominance"] is not None for p in back)
         assert any(p["hkl_candidates"] for p in back)
 
-    def test_annotate_command_returns_annotation_context(self, with_dataset):
+    def test_annotate_command_returns_annotation_context(self, layered_dataset):
         """peaks.annotate 是独立命令,此前命令层零测试。"""
-        engine, _pid, _sid, dataset_id = with_dataset
+        engine, _pid, _sid, dataset_id = layered_dataset
         engine.handle("peaks.detect", {"dataset_id": dataset_id})
         r = engine.handle("peaks.annotate", {"dataset_id": dataset_id})
         assert r["ok"], r
@@ -761,9 +780,9 @@ class TestAnnotationLifecycle:
             (dataset_id,),
         )
 
-    def test_annotate_without_prior_detect_still_persists(self, with_dataset):
+    def test_annotate_without_prior_detect_still_persists(self, layered_dataset):
         """peaks 表为空时 annotate 也必须落库(旧实现只 UPDATE,0 行)。"""
-        engine, _p, _s, ds_id = with_dataset
+        engine, _p, _s, ds_id = layered_dataset
         analysis = self._analysis(engine, ds_id)
         rows = engine.db.query_all(
             "SELECT id FROM peaks WHERE analysis_id = ?", (analysis["id"],)
@@ -784,8 +803,8 @@ class TestAnnotationLifecycle:
         assert ann is not None
         assert ann.get("labels") and ann.get("pipelineHash")
 
-    def test_commit_keeps_annotation_json_but_deletes_peaks(self, with_dataset):
-        engine, _p, _s, ds_id = with_dataset
+    def test_commit_keeps_annotation_json_but_deletes_peaks(self, layered_dataset):
+        engine, _p, _s, ds_id = layered_dataset
         analysis = self._analysis(engine, ds_id)
         engine.handle("peaks.annotate", {"dataset_id": ds_id})
         before = engine._load_annotation(analysis["id"])
@@ -803,8 +822,8 @@ class TestAnnotationLifecycle:
         after = engine._load_annotation(analysis["id"])
         assert after == before, "annotation_json 必须原样保留"
 
-    def test_state_restores_annotation_and_labels(self, with_dataset):
-        engine, _p, _s, ds_id = with_dataset
+    def test_state_restores_annotation_and_labels(self, layered_dataset):
+        engine, _p, _s, ds_id = layered_dataset
         analysis = self._analysis(engine, ds_id)
         engine.handle("peaks.annotate", {"dataset_id": ds_id})
         # 模拟参数变更:peaks 行被删,annotation_json 仍在
@@ -823,8 +842,8 @@ class TestAnnotationLifecycle:
         labeled = [p for p in data["peaks"] if p.get("hkl")]
         assert labeled, "peaks 表空时应从 annotation_json.labels 合回标签"
 
-    def test_state_stale_when_pipeline_changed(self, with_dataset):
-        engine, _p, _s, ds_id = with_dataset
+    def test_state_stale_when_pipeline_changed(self, layered_dataset):
+        engine, _p, _s, ds_id = layered_dataset
         engine.handle("peaks.annotate", {"dataset_id": ds_id})
         engine.handle("analysis.commit", {
             "dataset_id": ds_id, "pipeline": {"peaks": {"sensitivity": "high"}},
@@ -835,8 +854,8 @@ class TestAnnotationLifecycle:
             "参数变更后 annotation 的 pipelineHash 必须与当前不一致(→ stale)"
         )
 
-    def test_preview_restore_annotation_merges_labels(self, with_dataset):
-        engine, _p, _s, ds_id = with_dataset
+    def test_preview_restore_annotation_merges_labels(self, layered_dataset):
+        engine, _p, _s, ds_id = layered_dataset
         engine.handle("peaks.annotate", {"dataset_id": ds_id})
         # 改参数但不 commit:preview 用新 pipeline 出裸峰
         new_pipeline = {"peaks": {"sensitivity": "high"}}
@@ -854,10 +873,10 @@ class TestAnnotationLifecycle:
         })
         assert all(not p.get("hkl") for p in r2["data"]["peaks"])
 
-    def test_detect_also_saves_annotation_json(self, with_dataset):
-        engine, _p, _s, ds_id = with_dataset
+    def test_detect_also_saves_annotation_json(self, layered_dataset):
+        engine, _p, _s, ds_id = layered_dataset
         analysis = self._analysis(engine, ds_id)
-        r = engine.handle("peaks.detect", {"dataset_id": ds_id})
+        r = engine.handle("peaks.detect", {"dataset_id": ds_id, "annotate": True})
         assert r["ok"]
         ann = engine._load_annotation(analysis["id"])
         assert ann is not None and ann.get("labels"), (
@@ -1121,6 +1140,8 @@ class TestBatches:
         r = engine.handle("meta.purge", {"table": "batches", "id": bid})
         assert r["ok"], r
         assert engine.db.query_all("SELECT id FROM batches") == []
+        assert engine.db.query_one("SELECT id FROM projects WHERE id=?", (pid,)) is not None
+        assert len(engine.db.query_all("SELECT id FROM samples WHERE project_id=?", (pid,))) == 1
 
 
 class TestFolderScan:

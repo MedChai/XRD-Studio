@@ -51,6 +51,7 @@ export function qToTwoTheta(q: number, wavelength: number): number {
 /** 任意两轴之间换算(经 2θ 中转)。generic 或同轴返回原值。 */
 function convertOne(x: number, from: AxisType, to: AxisType, wavelength: number): number {
   if (from === to || from === "generic" || to === "generic") return x;
+  if ((from === "d" && to === "q") || (from === "q" && to === "d")) return 2 * Math.PI / x;
   const tt =
     from === "two_theta" ? x : from === "d" ? dToTwoTheta(x, wavelength) : qToTwoTheta(x, wavelength);
   return to === "two_theta" ? tt : to === "d" ? twoThetaToD(tt, wavelength) : twoThetaToQ(tt, wavelength);
@@ -78,6 +79,12 @@ export function fromDisplayX(
   if (view === "generic") return u;
   const v = view === "d" ? -u : u;
   return convertOne(v, view, nativeAxis, wavelength);
+}
+
+/** d 采集轴转到图表坐标时方向反转。ECharts 和存储的缩放区间均需升序。 */
+export function orderedRange(a: number, b: number): [number, number] | null {
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
+  return a <= b ? [a, b] : [b, a];
 }
 
 /** 轴的标准显示名(与引擎 coords.axis_label 一致;领域符号,不译)。 */

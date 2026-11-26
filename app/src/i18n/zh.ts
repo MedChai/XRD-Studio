@@ -1,3 +1,5 @@
+import { version } from "../../package.json";
+
 /** 界面文案(中文)。
  *
  * 为什么用集中常量而不是 i18n 库:
@@ -99,7 +101,8 @@ export const t = {
     rename: "重命名",
     delete: "移到回收站",
     /** 右键 / ⋯ 菜单:定位到磁盘上的实际文件 */
-    revealInDir: "在资源管理器中显示",
+    revealStored: "定位项目副本",
+    revealSource: "定位原始文件",
     /** 浏览器 dev 没有系统 shell:降级展示路径(已尽力复制) */
     revealPath: (p: string) => `浏览器预览模式,文件路径:${p}`,
     trash: "回收站",
@@ -162,6 +165,7 @@ export const t = {
 
   status: {
     saved: "已保存",
+    unsaved: "参数未保存",
     saving: "保存中…",
     computing: "计算中…",
     /** 峰参数改过但还没点「检测峰」固化 */
@@ -169,8 +173,6 @@ export const t = {
     points: (n: string) => `${n} 点`,
     pointsDisplay: (display: string, source: string) =>
       `显示 ${display} 点 / 原始 ${source} 点`,
-    /** 电化学模式下状态栏左端的模式标签(XRD 残值全部隐藏) */
-    ecMode: "电化学分析",
   },
 
   plot: {
@@ -240,9 +242,9 @@ export const t = {
     detectPeaks: "检测峰",
     detecting: "检测中…",
     detected: (n: number) => `已检测到 ${n} 个峰并保存`,
-    annotateHkl: "标注晶面",
+    annotateHkl: "按高镍 R-3m 标注",
     annotating: "标注中…",
-    annotateExpect: "首次数秒,之后走缓存",
+    annotateExpect: "仅用于已知高镍层状正极，按 R-3m 模型归属晶面",
     annotatedHkl: (n: number) => `已标注 ${n} 个峰的晶面`,
     annotatePartial: (matched: number, total: number) =>
       `只匹配上 ${matched}/${total} 个峰 —— 当前图与已保存参数不一致,请先点「检测峰」固化后再标注`,
@@ -354,7 +356,7 @@ export const t = {
     axisTwoTheta: "2θ (°)",
     axisD: "d (Å)",
     axisQ: "Q (Å⁻¹)",
-    wavelengthHint: "波长 λ(Å)。Cu Kα=1.5418,Co Kα=1.7903 —— 填错会让 d 值与晶面标注整体错位",
+    wavelengthHint: "留空沿用样品波长，填写后固定为本次采集波长。Cu Kα=1.5418,Co Kα≈1.789 —— 填错会让 d 值与晶面标注整体错位",
     scanFolder: "导入整个文件夹",
     folderNeedsDesktop: "文件夹导入需要桌面版;浏览器开发模式请手动选择文件",
     scanTitle: "确认实验分组",
@@ -422,14 +424,14 @@ export const t = {
     themeLight: "浅色",
     themeDark: "深色",
     accent: "强调色 · 蓝(Graphite 暂未开放)",
-    version: "V0.3 · 开发中",
+    version: `V${version}`,
     techStack: "Tauri 2 · React · ECharts · Python Engine",
     nonDestructive: "数据非破坏性管理,原始谱永不被修改。",
     pending: (tab: string) => `${tab}设置将在 Milestone 5–6 落地`,
     /** Data 页:数据存哪了/崩溃看什么(README §8.3) */
     dataTitle: "数据与存储",
     dataRootLabel: "数据存储位置",
-    dataRootHint: "数据库、原始文件副本、导出与日志都在这个目录下",
+    dataRootHint: "XRD 谱文件副本按项目保存在 projects 文件夹中",
     openDataDir: "打开数据目录",
     openLog: "打开日志",
     openLogMissing: "日志文件还不存在(引擎尚未写过日志)",
@@ -442,123 +444,4 @@ export const t = {
     dropHere: "拖入 XRD 数据",
   },
 
-  echem: {
-    /** 侧栏 / 导入入口 */
-    importEntry: "导入电化学数据",
-    importTitle: "导入电化学数据 (LAND)",
-    formats: "XLSX · 蓝电「记录表+循环表」导出",
-    pickFile: "点击选择 LAND 导出文件",
-    parsing: "正在解析(20MB 文件约 20 秒,请稍候)…",
-    parseFailed: (reason: string) => `解析失败:${reason}`,
-    previewCycles: (n: number) => `解析到 ${n} 个循环`,
-    programTitle: "实际工步(以数据为准,程序名可能不符)",
-    qaTitle: "数据质量",
-    massLabel: "活性物质质量 (mg,可选)",
-    massPlaceholder: "留空则按循环表比容量推算",
-    massEstimate: (v: string) => `推算质量:${v} mg`,
-    imported: (n: number) => `已导入 ${n} 个电化学数据`,
-    importedCycles: (n: number) => `${n} 圈`,
-    duplicateTitle: "发现重复文件",
-    duplicateHint: (n: number) =>
-      `有 ${n} 个文件此前已导入过。可以仍然导入一份副本。`,
-    importAnyway: "仍然导入",
-    cellImported: (name: string, n: number) => `「${name}」已导入(${n} 圈)`,
-
-    /** 侧栏样品下的电化学区 */
-    cellsSection: "电化学",
-    cyclesBadge: (n: number) => `${n} 圈`,
-
-    /** CellPage 页签 */
-    tabOverview: "循环总览",
-    tabDqdv: "dQ/dV",
-    tabTracks: "峰轨迹",
-    tabAttribution: "衰减归因",
-    cycleAxis: "循环圈数",
-    capacityAxis: "放电容量 (mAh/g)",
-    capacityAxisAny: "容量 (mAh/g)",
-    showCharge: "充电容量",
-    ceAxis: "库仑效率",
-    rateMain: "主倍率圈",
-    rateSlow: "低倍率圈",
-    rateFast: "高倍率圈",
-    incompleteCycle: "不完整末圈(测试中止)",
-    /** 充放同图的图例后缀 / 导出名 / 通道标签(此前硬编码在 OverviewTab) */
-    legendDischargeSuffix: "·放",
-    legendChargeSuffix: "·充",
-    exportOverviewSuffix: "_总览",
-    channelLabel: "通道",
-    channelColon: (ch: string) => `通道: ${ch}`,
-    metaTitle: "测试信息",
-    loading: "加载中…",
-    /** 测试信息折叠区的 QA 行(此前硬编码在 OverviewTab) */
-    qaRecords: (n: number) => `记录数 ${n}`,
-    qaBackwards: (n: number) => `时间回退 ${n}`,
-    qaInterval: (s: number) => `记录间隔中位 ${s}s`,
-    qaCapacityDev: (d: number) => `与循环表容量偏差中位 ${(d * 100).toFixed(3)}%`,
-
-    /** dQ/dV 页 */
-    dqdvCompute: "计算 dQ/dV",
-    dqdvComputing: "计算中…",
-    dqdvDone: (n: number, p: number) => `已计算 ${n} 条曲线,检出 ${p} 个峰`,
-    dqdvNotComputed: "尚未计算 dQ/dV —— 先算一次生成曲线与峰轨迹(结果持久化,之后重开可直接读回)。",
-    paramsModified: "参数已修改,需重新计算",
-    paramDv: "电压网格 (mV)",
-    paramSg: "平滑窗口",
-    paramVMin: "窗口下限 (V)",
-    paramVMax: "窗口上限 (V)",
-    paramMass: "质量 (mg)",
-    directionCharge: "充电",
-    directionDischarge: "放电",
-    directionBoth: "充放",
-    selectCycle: "圈号",
-    cycleChip: (n: number) => `圈 ${n}`,
-    addCycle: "添加圈…",
-    removeCycleHint: "点击移除该圈",
-    maxPicked: (n: number) => `最多同时比较 ${n} 圈`,
-    pickCycleHint: "点「添加圈…」选择要叠加比较的圈号",
-    curveTitle: "dQ/dV 曲线",
-    dqdvYAxis: "dQ/dV",
-    waterfallTitle: "逐圈瀑布图",
-    waterfallStep: "取样间隔(圈)",
-    curveMissing: "该圈该方向没有曲线(不完整圈或静置段)",
-
-    /** 峰轨迹页 */
-    tracksNeedCompute: "没有可跟踪的峰 —— 可调整电压窗口后重新计算。",
-    tracksNotComputed: "尚未计算 dQ/dV —— 先到「dQ/dV」页算一次(结果会持久化,重开软件自动读回)。",
-    colDirection: "方向",
-    colWindow: "窗口",
-    colRange: "圈范围",
-    colCount: "峰数",
-    colContinuity: "连续性",
-    trackPosition: "峰位 (V)",
-    trackArea: "峰面积 (mAh/g)",
-    truncatedStats: (n: number, full: number) => `截断峰 ${n} 个 · 完整峰 ${full} 个`,
-    truncatedEvidence: (drift: number) =>
-      `充电 H2→H3 峰位漂移 ${(drift * 1000).toFixed(0)} mV 并贴近截止电压 —— 相变在窗口内趋于不完整`,
-
-    /** 归因页 */
-    attributionNotRun: "尚未运行归因分析 —— 先计算 dQ/dV,再点「运行归因」。",
-    attributionRun: "运行归因",
-    attributionRunning: "计算中…",
-    attributionDone: "归因完成",
-    attributionStale: "所依据的 dQ/dV 参数已变更 —— 重新运行归因以更新",
-    attributionNeedDqdv: "请先计算 dQ/dV",
-    methodA: "方法 A · 回访圈插值",
-    methodB: "方法 B · 峰位移近似",
-    confidenceHigh: "高置信度",
-    confidenceLow: "低置信度(建议后续实验每 ~50 圈插一个 C/10 回访圈)",
-    compPolarization: "极化型",
-    compMaterial: "活性物质型",
-    compCutoff: "窗口截断型",
-    compTotal: "总衰减",
-    cumulativeIrreversible: "累积不可逆容量 (mAh/g)",
-    conclusionTitle: "结论",
-
-    /** 导出 */
-    exportCycles: "导出圈统计 (CSV)",
-    exportPeaks: "导出峰表 (CSV)",
-    exportAttribution: "导出归因 (CSV)",
-    exportFigure: "导出 PNG 图片",
-    exportDone: (path: string) => `已导出:${path}`,
-  },
 } as const;

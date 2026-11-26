@@ -1,4 +1,4 @@
-import type { CurvePayload, PeakResult } from "../types/engine";
+import type { AnalysisStateResult, CurvePayload, PeakResult } from "../types/engine";
 import { engineCommand } from "./engine";
 
 const isTauri = "__TAURI_INTERNALS__" in window;
@@ -133,7 +133,7 @@ export async function exportFigure(
  * 浏览器 dev:退化为逐条下载。图(PNG)不进批量 —— 图是前端 ECharts 渲的,
  * 批量渲图需要逐个切数据集,会打断用户操作,按需单条导出。 */
 export async function exportBatch(
-  datasets: { id: number; name: string }[],
+  datasets: { id: number; name: string; sampleName: string }[],
   opts: { peaks: boolean; data: boolean },
 ): Promise<{
   ok: boolean;
@@ -143,59 +143,41 @@ export async function exportBatch(
   error?: string;
 }> {
   if (datasets.length === 0) return { ok: false, error: "没有可导出的数据集" };
+  let dir: string | null = null;
   if (isTauri) {
     const { open } = await import("@tauri-apps/plugin-dialog");
-    const dir = await open({ directory: true, multiple: false, title: "选择导出目录" });
-    if (dir == null || Array.isArray(dir)) return { ok: false, cancelled: true };
-    let exported = 0;
-    let lastError: string | undefined;
-    for (const ds of datasets) {
-      const stem = ds.name.replace(/\.[^.]+$/, "");
-      if (opts.peaks) {
-        const r = await engineCommand("export.peaks", {
-          dataset_id: ds.id,
-          path: `${dir}\\${stem}_peaks.csv`,
-          overwrite: true,
-        });
-        if (r.ok) exported += 1;
-        else lastError = r.error;
-      }
-      if (opts.data) {
-        const r = await engineCommand("export.data", {
-          dataset_id: ds.id,
-          path: `${dir}\\${stem}_processed.csv`,
-          overwrite: true,
-        });
-        if (r.ok) exported += 1;
-        else lastError = r.error;
-      }
-    }
-    if (exported === 0 && lastError) return { ok: false, error: lastError };
-    return { ok: true, exported, dir: String(dir) };
+    const selected = await open({ directory: true, multiple: false, title: "选择导出目录" });
+    if (typeof selected !== "string") return { ok: false, cancelled: true };
+    dir = selected;
   }
-  // 浏览器:逐条下载(每个数据集一次保存弹窗/一次下载,比没有强)
   let exported = 0;
+  const errors: string[] = [];
   for (const ds of datasets) {
-    if (opts.peaks) {
-      const peaks = await engineCommand<{ peaks: PeakResult[] }>("peaks.list", {
-        dataset_id: ds.id,
-      });
-      const list = peaks.ok ? peaks.data.peaks : [];
-      const r = await exportPeaks(ds.id, ds.name, list);
-      if (r.ok) exported += 1;
-    }
-    if (opts.data) {
-      const cur = await engineCommand<CurvePayload>("datasets.curve", {
-        dataset_id: ds.id,
-        max_points: 20000,
-      });
-      if (cur.ok) {
-        const r = await exportData(ds.id, ds.name, cur.data);
-        if (r.ok) exported += 1;
+    const label = (ds.sampleName + "_" + ds.name.replace(/\.[^.]+$/, ""))
+      .replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_").slice(0, 120);
+    const stem = "ds" + ds.id + "_" + label;
+    for (const kind of ["peaks", "data"] as const) {
+      if (!opts[kind]) continue;
+      const filename = stem + (kind === "peaks" ? "_peaks.csv" : "_processed.csv");
+      if (dir !== null) {
+        const r = await engineCommand("export." + kind, {
+          dataset_id: ds.id, path: dir + "\\" + filename, overwrite: false,
+        });
+        if (r.ok) exported++;
+        else errors.push(filename + " — " + r.error);
+      } else {
+        const r = await engineCommand<AnalysisStateResult>("analysis.state", { dataset_id: ds.id });
+        if (r.ok) {
+          downloadText(filename, kind === "peaks" ? peaksCsv(ds.id, r.data.peaks) : dataCsv(r.data.curve));
+          exported++;
+        } else errors.push(filename + " — " + r.error);
       }
     }
   }
-  return { ok: true, exported };
+  if (errors.length) {
+    return { ok: false, exported, error: `已导出 ${exported} 个文件，${errors.length} 个失败。\n${errors.join("\n")}` };
+  }
+  return { ok: true, exported, dir: dir ?? undefined };
 }
 
 /** 电化学图 PNG 导出:与 exportFigure 同链路,但不带 dataset_id ——
@@ -204,6 +186,7 @@ export async function exportBatch(
 export async function exportEcFigure(
   figureName: string,
   dataUrl: string,
+  metadata?: Record<string, unknown>,
 ): Promise<{ ok: boolean; cancelled?: boolean; error?: string }> {
   const filename = `${figureName.replace(/\.[^.]+$/, "")}_figure.png`;
   const path = await choosePath(filename, "png");
@@ -214,6 +197,7 @@ export async function exportEcFigure(
       path,
       filename,
       png_base64: encoded,
+      cex_dqdv: metadata,
       overwrite: false,
     });
     return result.ok ? { ok: true } : { ok: false, error: result.error };
@@ -223,6 +207,29 @@ export async function exportEcFigure(
   anchor.download = filename;
   anchor.click();
   return { ok: true };
+}
+
+export async function exportDqdvTable(
+  name: string,
+  columns: string[],
+  rows: (string | number | null)[][],
+): Promise<{ ok: boolean; cancelled?: boolean; error?: string }> {
+  const filename = `${name}.csv`;
+  if (!isTauri) {
+    downloadText(filename, [columns, ...rows].map((row) => row.map(csvCell).join(",")).join("\r\n"));
+    return { ok: true };
+  }
+  const path = await choosePath(filename, "csv");
+  if (path == null) return { ok: false, cancelled: true };
+  const result = await engineCommand("cex.dqdv_export", { path, columns, rows });
+  return result.ok ? { ok: true } : { ok: false, error: result.error };
+}
+
+export async function exportCexDqdvCurves(payload: Record<string, unknown>) {
+  const path = await choosePath("CEX-dQdV-曲线.csv", "csv");
+  if (path == null) return { ok: false, cancelled: true };
+  const result = await engineCommand("cex.dqdv_export_curves", { ...payload, path });
+  return result.ok ? { ok: true } : { ok: false, error: result.error };
 }
 
 /** SVG 导出(F6)。走 blob 下载,不经引擎 —— SVG 是纯文本,浏览器/

@@ -68,6 +68,7 @@ class AttributionResult:
     truncated_evidence: dict[str, Any] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
     conclusion: str = ""
+    capacity_unit: str = "mAh/g"
     # 方法 B 峰序列不足时置位:此时三分量只是残差拆分,结论不能断言机理
     split_uninformative: bool = False
 
@@ -86,6 +87,7 @@ class AttributionResult:
             "truncatedEvidence": self.truncated_evidence,
             "notes": self.notes,
             "conclusion": self.conclusion,
+            "capacityUnit": self.capacity_unit,
         }
 
 
@@ -96,6 +98,7 @@ def run_attribution(
     cycles: list[dict[str, Any]],
     peaks: list[Any],
     params: AttributionParams | None = None,
+    *, capacity_unit: str = "mAh/g",
 ) -> AttributionResult:
     """计算归因。
 
@@ -147,6 +150,7 @@ def run_attribution(
         method="A" if use_a else "B",
         confidence="high" if use_a else "low",
         baseline=baseline,
+        capacity_unit=capacity_unit,
     )
 
     # ---- CE 与累积不可逆(独立于方法,直接从圈统计来)
@@ -351,14 +355,16 @@ def _conclusion(result: AttributionResult) -> None:
         result.conclusion = "有效圈不足,无法给出结论。"
         return
     last = result.cycles[-1]
-    if last.total <= 0.5:
+    unit = result.capacity_unit
+    fmt = ".1f" if unit == "mAh/g" else ".3g"
+    if last.total <= (0.5 if unit == "mAh/g" else 0):
         result.conclusion = "容量无明显衰减。"
         return
     if result.split_uninformative:
         # 峰序列不足时三分量只是残差堆在截断上,不能当成"截断主导"的结论
         result.conclusion = (
-            f"第 {last.cycle} 圈累计衰减 {last.total:.1f} mAh/g"
-            f"(基线 {result.baseline:.1f}),"
+            f"第 {last.cycle} 圈累计衰减 {last.total:{fmt}} {unit}"
+            f"(基线 {result.baseline:{fmt}}),"
             "但放电主峰序列不足,极化/活性/截断三分量无法拆分"
             "(该拆分把全部残差记入截断项,不代表机理判断)。"
             "建议补做低倍率回访圈,或降低寻峰高度阈值后重算。"
@@ -372,10 +378,10 @@ def _conclusion(result: AttributionResult) -> None:
     _, (dom_val, dom_text) = max(parts.items(), key=lambda kv: kv[1][0])
     share = dom_val / last.total * 100 if last.total > 0 else 0.0
     lines = [
-        f"第 {last.cycle} 圈累计衰减 {last.total:.1f} mAh/g"
-        f"(基线 {result.baseline:.1f}),主导分量为{dom_text.split('(')[0]}"
+        f"第 {last.cycle} 圈累计衰减 {last.total:{fmt}} {unit}"
+        f"(基线 {result.baseline:{fmt}}),主导分量为{dom_text.split('(')[0]}"
         f"占 {share:.0f}%。",
-        f"分量:极化 {last.polarization:.1f} / 活性 {last.material:.1f} / 截断 {last.cutoff:.1f} mAh/g。",
+        f"分量:极化 {last.polarization:{fmt}} / 活性 {last.material:{fmt}} / 截断 {last.cutoff:{fmt}} {unit}。",
     ]
     ev = result.truncated_evidence
     if ev.get("available") and ev.get("driftV", 0) > 0.05:

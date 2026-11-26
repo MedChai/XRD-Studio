@@ -22,11 +22,13 @@ rem ===================================================================
 set "XRD_DISTNAME=XRD Studio.exe"
 set "XRD_LOCALAPPDATA=%LOCALAPPDATA%"
 if not defined XRD_LOCALAPPDATA set "XRD_LOCALAPPDATA=%USERPROFILE%\AppData\Local"
-set "XRD_DATA_ROOT=%XRD_LOCALAPPDATA%\XRDStudio"
-set "XRD_LOG_DIR=%XRD_DATA_ROOT%\logs"
-
 set "ROOT=%~dp0"
 if "%ROOT:~-1%"=="\" set "ROOT=%ROOT:~0,-1%"
+if not defined XRD_DATA_ROOT (
+    set "XRD_DATA_ROOT=%ROOT%\XRDStudio\library"
+    set "XRD_LEGACY_DATA_ROOT=%XRD_LOCALAPPDATA%\XRDStudio"
+)
+if not defined XRD_LOG_DIR set "XRD_LOG_DIR=%ROOT%\XRDStudio\logs"
 set "ROOT_WIN=%ROOT:\=/%"
 set "APPDIR=%ROOT%\app"
 set "TAURI_DIR=%APPDIR%\src-tauri"

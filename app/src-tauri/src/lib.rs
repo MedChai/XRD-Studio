@@ -3,7 +3,7 @@
 //! 职责(README §3/§11.2):
 //!  - 监管 Python 分析引擎 sidecar(stdio + 长度前缀帧,退避重启)
 //!  - engine_command:前端唯一引擎入口,请求按 id 路由
-//!  - Data Store 路径解析(默认 %LOCALAPPDATA%\XRDStudio,§11.4)
+//!  - 在软件目录维护项目库，并向引擎提供旧版库的只读迁移来源
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -185,7 +185,7 @@ fn read_frame(r: &mut dyn Read) -> std::io::Result<(Value, Vec<u8>)> {
 // 启动 / 重启 / 读取循环
 // ------------------------------------------------------------------
 
-fn ensure_running(data_root: &std::path::Path) -> Result<(), String> {
+fn ensure_running(data_root: &std::path::Path, log_dir: &std::path::Path) -> Result<(), String> {
     let eng = engine();
     // 启动全程持锁:并发请求(如首屏 Promise.all)不能都穿过
     // "检查未运行 → spawn" 的间隙,否则 sidecar 被重复拉起。
@@ -194,7 +194,16 @@ fn ensure_running(data_root: &std::path::Path) -> Result<(), String> {
         return Ok(()); // 已在运行(判定:stdin 句柄存在)
     }
 
-    let mut child = sidecar_command(data_root)
+    std::fs::create_dir_all(log_dir)
+        .map_err(|e| format!("无法写入软件目录 {}：{e}", log_dir.display()))?;
+    let mut command = sidecar_command(data_root);
+    command.env("XRD_LOG_DIR", log_dir);
+    if std::env::var_os("XRD_DATA_ROOT").is_none() && std::env::var_os("XRD_LEGACY_DATA_ROOT").is_none() {
+        if let Some(base) = std::env::var_os("LOCALAPPDATA") {
+            command.env("XRD_LEGACY_DATA_ROOT", std::path::PathBuf::from(base).join("XRDStudio"));
+        }
+    }
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -213,7 +222,7 @@ fn ensure_running(data_root: &std::path::Path) -> Result<(), String> {
 
     // stderr → 日志文件(logs/engine.log)
     if let Some(mut se) = stderr {
-        let log_dir = data_root.join("logs");
+        let log_dir = log_dir.to_path_buf();
         thread::spawn(move || {
             let _ = std::fs::create_dir_all(&log_dir);
             if let Ok(mut f) = std::fs::OpenOptions::new()
@@ -315,19 +324,19 @@ fn pack_response(value: &Value, body: &[u8]) -> tauri::ipc::Response {
 
 #[tauri::command]
 async fn engine_command(cmd: String, payload: String) -> Result<tauri::ipc::Response, String> {
-    let data_root = {
-        // %LOCALAPPDATA%\XRDStudio(§11.4:避免 Program Files 权限与非 ASCII 用户目录问题)
-        let base = std::env::var("LOCALAPPDATA")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|_| {
-                dirs_fallback()
-            });
-        let root = base.join("XRDStudio");
-        let _ = std::fs::create_dir_all(&root);
-        root
-    };
-
-    ensure_running(&data_root)?;
+    let exe = std::env::current_exe().map_err(|e| format!("无法定位软件目录：{e}"))?;
+    let dir = exe.parent().ok_or("无法定位软件目录")?;
+    // A binary launched directly from this checkout must use the same library as start.bat.
+    let software = dir.ancestors().nth(4).filter(|root| {
+        (dir == root.join("app/src-tauri/target/release") || dir == root.join("app/src-tauri/target/debug"))
+            && root.join("start.bat").is_file()
+    }).unwrap_or(dir);
+    let base = software.join("XRDStudio");
+    let data_root = std::env::var_os("XRD_DATA_ROOT")
+        .map(std::path::PathBuf::from).unwrap_or_else(|| base.join("library"));
+    let log_dir = std::env::var_os("XRD_LOG_DIR")
+        .map(std::path::PathBuf::from).unwrap_or_else(|| base.join("logs"));
+    ensure_running(&data_root, &log_dir)?;
 
     let id = engine().next_id.fetch_add(1, Ordering::SeqCst);
     let payload: Value =
@@ -353,20 +362,6 @@ async fn engine_command(cmd: String, payload: String) -> Result<tauri::ipc::Resp
     // 摘除本次注册(reader 线程已取出,这里只防御竞态残留)
     eng_pending().remove(&id);
     Ok(pack_response(&resp, &body))
-}
-
-#[cfg(windows)]
-fn dirs_fallback() -> std::path::PathBuf {
-    std::env::var("USERPROFILE")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::PathBuf::from("."))
-}
-
-#[cfg(not(windows))]
-fn dirs_fallback() -> std::path::PathBuf {
-    std::env::var("HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::PathBuf::from("."))
 }
 
 // ------------------------------------------------------------------

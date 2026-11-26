@@ -7,7 +7,9 @@ copy,用户移动/重命名/删除外部原文件不影响 Dataset。
 
     <data_root>/
     ├── database/xrdstudio.db
-    ├── data/<ULID>/original.<ext> + metadata.json
+    ├── projects/<项目编号-名称>/<ULID>/<原文件名> + metadata.json
+    ├── projects/<项目编号-名称>/<样品编号-名称>/蓝电数据/<数据名>.cex
+    ├── data/<ULID>/original.<ext> (电化学)
     ├── cache/
     ├── exports/
     └── logs/
@@ -19,15 +21,19 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shutil
 import string
 import threading
+from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 
 _ALPHABET = string.ascii_lowercase + string.digits
+_CEX_FOLDER = "蓝电数据"
+_WINDOWS_DEVICE_NAME = re.compile(r"CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|(?:COM|LPT)[1-9¹²³]", re.IGNORECASE)
 
 
 def generate_ulid(rng: np.random.Generator | None = None) -> str:
@@ -54,9 +60,9 @@ class DataStore:
     """管理 Data Store 目录与导入复制。线程安全。"""
 
     def __init__(self, data_root: str | Path):
-        self.root = Path(data_root)
+        self.root = Path(data_root).resolve()
         self._lock = threading.Lock()
-        for sub in ("database", "data", "cache", "exports", "logs"):
+        for sub in ("database", "projects", "data", "cache", "exports", "logs"):
             (self.root / sub).mkdir(parents=True, exist_ok=True)
 
     # --- 路径 ---
@@ -73,10 +79,20 @@ class DataStore:
 
     # --- 导入 ---
 
+    def project_file(self, folder: str, key: str, filename: str) -> Path:
+        for component in (folder, key, filename):
+            if not component or Path(component).name != component or component in (".", ".."):
+                raise ValueError("项目存储路径无效")
+        if filename.casefold() == "metadata.json":
+            filename = "source-" + filename
+        return self.abs_path(str(Path("projects", folder, key, filename)))
+
     def import_file(
         self,
         source: str | Path,
         metadata: dict,
+        *,
+        project_folder: str | None = None,
     ) -> tuple[str, str]:
         """复制外部文件进 Data Store。
 
@@ -87,28 +103,66 @@ class DataStore:
         if not src.is_file():
             raise FileNotFoundError(f"源文件不存在:{src}")
 
-        file_hash = sha256_of_file(src)
-
         with self._lock:
             ulid = generate_ulid()
-            dest_dir = self.root / "data" / ulid
+            dest = (self.project_file(project_folder, ulid, src.name) if project_folder is not None
+                    else self.abs_path(f"data/{ulid}/original{src.suffix.lower()}"))
+            dest_dir = dest.parent
             dest_dir.mkdir(parents=True, exist_ok=False)
-            dest = dest_dir / f"original{src.suffix.lower()}"
-            shutil.copy2(src, dest)
+            try:
+                shutil.copy2(src, dest)
+                file_hash = sha256_of_file(dest)
+                meta = {
+                    "original_filename": src.name, "source_path": str(src.resolve()),
+                    "file_hash": file_hash, "imported_at": datetime.now().isoformat(timespec="seconds"),
+                    **metadata,
+                }
+                (dest_dir / "metadata.json").write_text(
+                    json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+            except Exception:
+                self.remove_stored(dest.relative_to(self.root).as_posix())
+                raise
 
-            meta = {
-                "original_filename": src.name,
-                "source_path": str(src.resolve()),
-                "file_hash": file_hash,
-                "imported_at": datetime.now().isoformat(timespec="seconds"),
-                **metadata,
-            }
-            (dest_dir / "metadata.json").write_text(
-                json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
+        return dest.relative_to(self.root).as_posix(), file_hash
 
-        stored = f"data/{ulid}/{dest.name}"
-        return stored, file_hash
+    def import_sample_cex(
+        self, source: Path, project_folder: str, sample_folder: str, name: str,
+    ) -> tuple[str, str]:
+        """复制快照到样品的蓝电目录，返回实际归档路径及 SHA-256。"""
+        if not isinstance(name, str):
+            raise ValueError("请输入数据名称")
+        name = name.strip()
+        if name.casefold().endswith(".cex"):
+            name = name[:-4].rstrip()
+        if (not name or name.endswith(".") or re.search(r'[<>:"/\\|?*\x00-\x1f]', name)
+                or _WINDOWS_DEVICE_NAME.fullmatch(name.split(".", 1)[0].rstrip())):
+            raise ValueError("请输入可用作 Windows 文件名的数据名称")
+        if len(name.encode("utf-16-le")) // 2 > 240:
+            raise ValueError("数据名称过长，请缩短后再试")
+
+        directory = self.project_file(project_folder, sample_folder, _CEX_FOLDER)
+        if directory != self.root / "projects" / project_folder / sample_folder / _CEX_FOLDER:
+            raise ValueError("样品的蓝电数据目录不可用")
+        with self._lock, source.open("rb") as src:
+            directory.mkdir(parents=True, exist_ok=True)
+            dest = directory / f"{name}.cex"
+            copy_number = 2
+            while True:
+                try:
+                    output = dest.open("xb")
+                    break
+                except FileExistsError:
+                    dest = directory / f"{name} ({copy_number}).cex"
+                    copy_number += 1
+            try:
+                with output:
+                    shutil.copyfileobj(src, output, 1 << 20)
+                digest = sha256_of_file(dest)
+            except Exception:
+                dest.unlink(missing_ok=True)
+                raise
+        return dest.relative_to(self.root).as_posix(), digest
 
     # --- 删除 ---
 
@@ -119,15 +173,7 @@ class DataStore:
     # api/commands.py 的 Engine._curve_cache。
 
     def remove_stored(self, stored_path: str) -> bool:
-        """永久删除一个 dataset 的存储目录 `data/<ULID>/`。
-
-        只在回收站的「彻底删除」时调用 —— 软删除不碰磁盘,所以磁盘占用
-        会一直累积到用户主动清理。
-
-        越界保护:除了 abs_path 的逃逸检查,这里还要求 ULID 目录的父目录
-        必须就叫 `data`。少了这一道,一个被构造成 `data/../database/x` 的
-        stored_path 就能删掉数据库目录。
-        """
+        """清理单个托管副本及其专属缓存。"""
         if not stored_path:
             return False
         try:
@@ -135,8 +181,24 @@ class DataStore:
         except ValueError:
             return False
 
+        relative = Path(stored_path)
+        parts = relative.parts
+        if len(parts) == 5 and parts[0] == "projects" and parts[3] == _CEX_FOLDER:
+            if relative.suffix.lower() != ".cex" or file_path != self.root / relative:
+                return False
+            with self._lock:
+                if not file_path.is_file():
+                    return False
+                file_path.unlink()
+                for folder in (file_path.parent, file_path.parent.parent):
+                    with suppress(OSError):
+                        folder.rmdir()
+            return True
+
         ulid_dir = file_path.parent
-        if ulid_dir.parent.name != "data":
+        parts = file_path.relative_to(self.root).parts
+        if not ((len(parts) == 3 and parts[0] == "data") or
+                (len(parts) == 4 and parts[0] == "projects")):
             return False
         if not ulid_dir.is_dir():
             return False

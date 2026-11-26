@@ -199,11 +199,13 @@ export function RowMenuItems({
   id,
   name,
   onClose,
+  onAddCex,
 }: {
   table: TrashKind;
   id: number;
   name: string;
   onClose: () => void;
+  onAddCex?: () => void;
 }) {
   const setRenaming = useUiStore((s) => s.setRenaming);
   const setEditingSample = useUiStore((s) => s.setEditingSample);
@@ -236,6 +238,17 @@ export function RowMenuItems({
           {t.sample.edit}
         </button>
       )}
+      {table === "samples" && onAddCex && (
+        <button
+          className="tr flex items-center gap-2 rounded-[var(--radius-control)] px-2.5 py-1.5 text-left text-[13px] text-[var(--text-primary)] hover:bg-[var(--hover)]"
+          onClick={() => {
+            onClose();
+            onAddCex();
+          }}
+        >
+          添加蓝电数据
+        </button>
+      )}
       {/* 只有数据集能加入对比 —— 项目/实验/批次是容器,没有曲线可画 */}
       {table === "datasets" && (
         <button
@@ -253,13 +266,14 @@ export function RowMenuItems({
         </button>
       )}
       {/* 文件型对象才有磁盘位置。右键行与「⋯」菜单共用本组件 → 两处都有。 */}
-      {(table === "datasets" || table === "ec_cells") && (
+      {(table === "datasets" || table === "ec_cells") && (["stored", "source"] as const).map((kind) => (
         <button
+          key={kind}
           className="tr flex items-center gap-2 rounded-[var(--radius-control)] px-2.5 py-1.5 text-left text-[13px] text-[var(--text-primary)] hover:bg-[var(--hover)]"
           onClick={() => {
             onClose();
             void (async () => {
-              const res = await revealInExplorer(table, id);
+              const res = await revealInExplorer(table, id, kind);
               if (!res.ok) {
                 useUiStore.getState().showToast("error", res.error);
               } else if (res.mode === "degraded") {
@@ -269,9 +283,9 @@ export function RowMenuItems({
             })();
           }}
         >
-          {t.library.revealInDir}
+          {kind === "source" ? t.library.revealSource : t.library.revealStored}
         </button>
-      )}
+      ))}
       <button
         className={cn(
           "tr flex items-center gap-2 rounded-[var(--radius-control)] px-2.5 py-1.5 text-left text-[13px]",

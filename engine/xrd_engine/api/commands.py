@@ -19,14 +19,19 @@ import contextlib
 import csv
 import hashlib
 import json
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
+from ..coords import DEFAULT_WAVELENGTH, convert
 from ..database.db import ALLOWED_TABLES, Database
+from ..electrochem.cex_native import CexError
+from ..electrochem.cex_viewer import CexViewer
 from ..high_ni import HighNiProfile, analyze_high_ni, default_profile
+from ..high_ni.analysis import as_two_theta
 from ..importers.loader import (
     ColumnMappingRequired,
     LoadFailure,
@@ -48,7 +53,7 @@ from ..processing.pipeline import PipelineError, run_pipeline, validate_params
 from ..services.data_store import DataStore, sha256_of_file
 from .envelope import BIN_KEY, pack_arrays
 
-ENGINE_VERSION = "0.4.0"
+ENGINE_VERSION = "0.4.3"
 
 
 class EngineError(Exception):
@@ -58,6 +63,16 @@ class EngineError(Exception):
         super().__init__(reason)
         self.reason = reason
         self.detail = detail
+
+
+def _valid_wavelength(value) -> float:
+    try:
+        wavelength = float(value)
+    except (ValueError, TypeError) as exc:
+        raise EngineError("波长必须是数字") from exc
+    if not 0.3 <= wavelength <= 3.0:
+        raise EngineError("波长超出合理范围(0.3–3.0 Å)")
+    return wavelength
 
 
 def params_from_json(data: dict[str, Any]) -> PipelineParams:
@@ -82,6 +97,20 @@ def _dump_candidates(candidates: list[dict] | None) -> str | None:
     if not candidates:
         return None
     return json.dumps(candidates, ensure_ascii=False)
+
+
+def _stale_domain(result, dataset):
+    fingerprint = result.get("pipelineHash")
+    if fingerprint:
+        if fingerprint != _pipeline_hash(json.loads(dataset["pipeline_json"])):
+            return True
+    elif dataset["preset_id"] is not None:
+        return True
+    if result.get("wavelength", DEFAULT_WAVELENGTH) != dataset["wavelength"]:
+        return True
+    return not result.get("axisConversionVersion") and (
+        dataset["x_axis_type"] != "two_theta" or dataset["wavelength"] != DEFAULT_WAVELENGTH
+    )
 
 
 def _trend_metrics(result: dict) -> dict[str, Any]:
@@ -215,9 +244,11 @@ def curve_payload(
 class Engine:
     """持有 Database + DataStore 的引擎实例。"""
 
-    def __init__(self, data_root: str | Path):
+    def __init__(self, data_root: str | Path, *, log_dir: str | Path | None = None):
         self.store = DataStore(data_root)
+        self.log_dir = Path(log_dir) if log_dir else self.store.root / "logs"
         self.db = Database(self.store.db_path)
+        self.cex = CexViewer(self.store, self.db)
         # 已解析曲线缓存(§9.3)。见 _load_dataset_curve 的说明。
         self._curve_cache: dict[int, tuple[tuple, Curve]] = {}
 
@@ -233,6 +264,8 @@ class Engine:
         except EngineError as exc:
             return _fail(exc)
         except PipelineError as exc:
+            return _fail(exc)
+        except CexError as exc:
             return _fail(exc)
         except Exception as exc:
             # traceback 进日志文件,不给用户看(§68)
@@ -268,9 +301,12 @@ class Engine:
         if row is None:
             raise EngineError("目标 Project 不存在")
 
+        supplied = p.get("wavelength")
+        acquisition_wavelength = None if supplied is None else _valid_wavelength(supplied)
         sample_id = p.get("sample_id")
         if sample_id is None:
             ns = p.get("new_sample") or {}
+            sample_wavelength = _valid_wavelength(ns.get("wavelength", DEFAULT_WAVELENGTH))
             name = (ns.get("name") or "").strip()
             if not name:
                 raise EngineError("新样品必须填写 Sample Name")
@@ -283,22 +319,24 @@ class Engine:
                     str(ns.get("temperature", "")),
                     str(ns.get("duration", "")),
                     str(ns.get("material", "")),
-                    float(ns.get("wavelength", 1.5418)),
+                    sample_wavelength,
                 ),
             )
         else:
-            if self.db.query_one(
-                "SELECT id FROM samples WHERE id = ? AND deleted_at IS NULL",
-                (sample_id,),
-            ) is None:
+            sample = self.db.query_one(
+                "SELECT wavelength FROM samples WHERE id = ? AND project_id = ? AND deleted_at IS NULL",
+                (sample_id, project_id),
+            )
+            if sample is None:
                 raise EngineError("目标 Sample 不存在")
+            sample_wavelength = sample["wavelength"] or DEFAULT_WAVELENGTH
 
         # 批次:给了 id 就复用,给了 name 就新建,都没给则不分组。
         batch_id = p.get("batch_id")
         if batch_id is not None:
             if self.db.query_one(
-                "SELECT id FROM batches WHERE id = ? AND deleted_at IS NULL",
-                (batch_id,),
+                "SELECT id FROM batches WHERE id = ? AND sample_id = ? AND deleted_at IS NULL",
+                (batch_id, sample_id),
             ) is None:
                 raise EngineError("目标批次不存在")
         else:
@@ -331,7 +369,7 @@ class Engine:
             result = load_file(
                 path,
                 x_axis_type=p.get("x_axis_type", "two_theta"),
-                wavelength=float(p.get("wavelength", 1.5418)),
+                wavelength=acquisition_wavelength or sample_wavelength,
                 x_column=p.get("x_column"),
                 y_column=p.get("y_column"),
             )
@@ -353,6 +391,24 @@ class Engine:
             ds = result
             file_hash = sha256_of_file(Path(path))
 
+            # A v7 wide table cannot be reopened until its owner supplies the columns again.
+            if p.get("x_column") is not None and p.get("y_column") is not None and not p.get("import_anyway"):
+                legacy = self.db.query_one(
+                    """SELECT id, name, stored_path, x_axis_type FROM datasets
+                       WHERE file_hash = ? AND sample_id = ? AND x_column IS NULL
+                         AND y_column IS NULL AND deleted_at IS NULL ORDER BY id LIMIT 1""",
+                    (file_hash, sample_id),
+                )
+                if legacy and isinstance(load_file(self.store.abs_path(legacy["stored_path"])), ColumnMappingRequired):
+                    self.db.execute(
+                        """UPDATE datasets SET x_column=?, y_column=?, x_min=?, x_max=?, step=?,
+                           point_count=?, grid=? WHERE id=?""",
+                        (*ds.source_columns, float(ds.curve.x[0]), float(ds.curve.x[-1]),
+                         float(np.median(np.diff(ds.curve.x))), ds.curve.point_count, ds.original_grid, legacy["id"]),
+                    )
+                    imported.append({"id": legacy["id"], "name": legacy["name"]})
+                    continue
+
             # 查重(§8.4)
             dup = self.db.find_duplicate_by_hash(file_hash)
             if dup is not None and not p.get("import_anyway"):
@@ -368,29 +424,38 @@ class Engine:
                 })
                 continue
 
-            stored, _ = self.store.import_file(path, {
+            stored, copied_hash = self.store.import_file(path, {
                 "project_id": project_id,
                 "sample_id": sample_id,
-            })
+            }, project_folder=self.db.project_storage_folder(project_id))
+            if copied_hash != file_hash:
+                self.store.remove_stored(stored)
+                failures.append({"path": str(path), "reason": "复制期间源文件已更改，请重新导入"})
+                continue
             name = Path(path).name
-            dataset_id = self.db.insert(
-                """INSERT INTO datasets
-                   (sample_id, name, original_filename, source_path, stored_path,
-                    file_hash, x_axis_type, x_min, x_max, step, point_count, grid,
-                    batch_id)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (
-                    sample_id, name, name, str(Path(path).resolve()), stored,
-                    file_hash, ds.curve.x_axis_type,
-                    float(ds.curve.x[0]), float(ds.curve.x[-1]),
-                    float(np.median(np.diff(ds.curve.x))), int(ds.curve.x.size),
-                    ds.original_grid, batch_id,
-                ),
-            )
-            self.db.insert(
-                "INSERT INTO analyses (dataset_id, pipeline_json) VALUES (?,?)",
-                (dataset_id, "{}"),
-            )
+            try:
+                with self.db.transaction():
+                    dataset_id = self.db.insert(
+                        """INSERT INTO datasets
+                           (sample_id, name, original_filename, source_path, stored_path,
+                            file_hash, x_axis_type, x_min, x_max, step, point_count, grid,
+                            batch_id, x_column, y_column, acquisition_wavelength)
+                           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (
+                            sample_id, name, name, str(Path(path).resolve()), stored,
+                            file_hash, ds.curve.x_axis_type,
+                            float(ds.curve.x[0]), float(ds.curve.x[-1]),
+                            float(np.median(np.diff(ds.curve.x))), int(ds.curve.x.size),
+                            ds.original_grid, batch_id, *ds.source_columns, acquisition_wavelength,
+                        ),
+                    )
+                    self.db.insert(
+                        "INSERT INTO analyses (dataset_id, pipeline_json) VALUES (?,?)",
+                        (dataset_id, "{}"),
+                    )
+            except Exception:
+                self.store.remove_stored(stored)
+                raise
             imported.append({"id": dataset_id, "name": name})
 
         return {
@@ -483,7 +548,7 @@ class Engine:
             row["stored_path"],
             row["file_hash"],
             row["x_axis_type"],
-            round(float(wavelength), 6),
+            wavelength, row["x_column"], row["y_column"],
         )
         hit = self._curve_cache.get(int(dataset_id))
         if hit is not None and hit[0] == fingerprint:
@@ -496,9 +561,11 @@ class Engine:
         # x_axis_type,波长静默退回默认的 1.5418。
         result = load_file(
             path,
-            x_axis_type=row["x_axis_type"],
-            wavelength=wavelength,
+            x_axis_type=row["x_axis_type"], wavelength=wavelength,
+            x_column=row["x_column"], y_column=row["y_column"],
         )
+        if isinstance(result, ColumnMappingRequired):
+            raise EngineError("旧数据集缺少列映射，请重新导入原文件并指定角度列和强度列", result.reason)
         if not hasattr(result, "curve"):
             raise EngineError("无法读取数据文件", str(result))
 
@@ -533,10 +600,10 @@ class Engine:
             compute_peak_metrics=bool(p.get("compute_peak_metrics", True)),
         )
         annotation = None
-        if p.get("annotate", True):
+        if p.get("annotate", False):
             annotation = self._annotate_pipeline_peaks(result, int(p["dataset_id"]))
         peaks = [pk.to_dict() for pk in result.peaks]
-        if not p.get("annotate", True) and p.get("restoreAnnotation"):
+        if not p.get("annotate", False) and p.get("restoreAnnotation"):
             analysis = self._active_analysis(int(p["dataset_id"]))
             stored_annotation = self._load_annotation(analysis["id"])
             _merge_annotation_labels(peaks, stored_annotation, _curve_step(curve))
@@ -559,24 +626,21 @@ class Engine:
         """把 preview 满意后的参数落库(§10.3 committing 态)。"""
         dataset_id = p["dataset_id"]
         analysis = self._active_analysis(dataset_id)
-        pipeline_json = json.dumps(p.get("pipeline") or {}, ensure_ascii=False)
-        if pipeline_json != analysis["pipeline_json"]:
-            # 旧峰是按上一套 pipeline 算出的。参数改变后必须让它们失效,
-            # 否则重启/切图时会把旧峰误显示成当前分析结果。
-            # **annotation_json 刻意保留**:labels 快照按位置合回新峰,
-            # 过期与否由前端比对 pipelineHash 决定(见 _pipeline_hash)。
-            # 标注是"这谱标过"的持久事实,不该随参数微调蒸发。
-            self.db.execute("DELETE FROM peaks WHERE analysis_id = ?", (analysis["id"],))
-            # 高镍结果与趋势指标同样基于处理后曲线。继续保留会让趋势图
-            # 混入上一套 pipeline 的旧结果,比显示“尚未分析”更危险。
-            self.db.execute(
-                "DELETE FROM domain_results WHERE analysis_id = ?", (analysis["id"],)
-            )
-        self.db.execute(
-            "UPDATE analyses SET pipeline_json = ?, updated_at = datetime('now') WHERE id = ?",
-            (pipeline_json, analysis["id"]),
-        )
+        pipeline = p.get("pipeline") or {}
+        with self.db.transaction() as conn:
+            self._write_pipeline(conn, analysis, pipeline, analysis["preset_id"])
         return {"analysisId": analysis["id"]}
+
+    def _write_pipeline(self, conn, analysis, pipeline, preset_id):
+        analysis_id = analysis["id"]
+        if json.loads(analysis["pipeline_json"] or "{}") != pipeline:
+            conn.execute("DELETE FROM peaks WHERE analysis_id = ?", (analysis_id,))
+            conn.execute("DELETE FROM domain_results WHERE analysis_id = ?", (analysis_id,))
+        conn.execute(
+            """UPDATE analyses SET pipeline_json = ?, preset_id = ?, updated_at = datetime('now')
+               WHERE id = ?""",
+            (json.dumps(pipeline, ensure_ascii=False), preset_id, analysis_id),
+        )
 
     def _cmd_analysis_state(self, p: dict) -> dict:
         """读取并快速重建一个数据集的已保存分析状态。
@@ -630,7 +694,7 @@ class Engine:
     def _load_annotation(self, analysis_id: int) -> dict | None:
         """读 analyses.annotation_json;无/坏数据返回 None。"""
         row = self.db.query_one(
-            "SELECT annotation_json FROM analyses WHERE id = ?", (analysis_id,)
+            "SELECT dataset_id, annotation_json FROM analyses WHERE id = ?", (analysis_id,)
         )
         if row is None or not row["annotation_json"]:
             return None
@@ -638,7 +702,10 @@ class Engine:
             data = json.loads(row["annotation_json"])
         except (TypeError, json.JSONDecodeError):
             return None
-        return data if isinstance(data, dict) else None
+        if (isinstance(data, dict) and data.get("model") == "high_ni_layered"
+                and data.get("wavelength") == self._dataset_wavelength(row["dataset_id"])):
+            return data
+        return None
 
     def _save_annotation(
         self, analysis_id: int, context: dict | None, pipeline: dict, peaks: list
@@ -649,8 +716,9 @@ class Engine:
         靠这份快照按位置把 hkl 合回新检出的峰,标注才不会蒸发。
         """
         if not context:
+            self.db.execute("UPDATE analyses SET annotation_json = NULL WHERE id = ?", (analysis_id,))
             return None
-        payload = dict(context)
+        payload = dict(context, model="high_ni_layered")
         payload["pipelineHash"] = _pipeline_hash(pipeline)
         payload["annotatedAt"] = datetime.now().isoformat(timespec="seconds")
         payload["labels"] = [
@@ -668,6 +736,20 @@ class Engine:
             (json.dumps(payload, ensure_ascii=False), analysis_id),
         )
         return payload
+
+    def _peak_geometry(self, analysis):
+        dataset = self.db.query_one("SELECT x_axis_type FROM datasets WHERE id = ?", (analysis["dataset_id"],))
+        axis = dataset["x_axis_type"]
+        signature = {"pipeline": json.loads(analysis["pipeline_json"]), "axis": axis}
+        if axis in ("d", "q"):
+            signature["wavelength"] = self._dataset_wavelength(analysis["dataset_id"])
+        return axis, _pipeline_hash(signature)
+
+    def _peaks_current(self, analysis):
+        axis, current = self._peak_geometry(analysis)
+        if not analysis["peaks_pipeline_hash"]:
+            return analysis["preset_id"] is None and axis not in ("d", "q")
+        return analysis["peaks_pipeline_hash"] == current
 
     def _insert_peaks(self, analysis_id: int, peaks: list) -> None:
         """全量写入(检测路径与空表时的标注路径共用)。
@@ -690,6 +772,10 @@ class Engine:
                 ),
             )
 
+        analysis = self.db.query_one("SELECT * FROM analyses WHERE id = ?", (analysis_id,))
+        self.db.execute("UPDATE analyses SET peaks_pipeline_hash = ? WHERE id = ?",
+                        (self._peak_geometry(analysis)[1], analysis_id))
+
     def _annotate_pipeline_peaks(self, result: ProcessingResult, dataset_id: int) -> dict | None:
         """就地给 pipeline 输出的峰打上晶面标注,返回本次拟合上下文。
 
@@ -706,8 +792,17 @@ class Engine:
 
         wavelength = self._dataset_wavelength(dataset_id)
         curve = self._load_dataset_curve(dataset_id)
+        x, y, _warnings = as_two_theta(curve)
+        if curve.x_axis_type == "generic":
+            raise EngineError("晶面标注需要 2θ、d 或 Q 采集轴")
+        angular_peaks = result.peaks
+        if curve.x_axis_type != "two_theta":
+            with np.errstate(divide="ignore", invalid="ignore"):
+                positions = convert([pk.position for pk in result.peaks], curve.x_axis_type, "two_theta", wavelength)
+            angular_peaks = [replace(pk, position=float(pos)) for pk, pos in zip(result.peaks, positions, strict=True)
+                             if np.isfinite(pos) and pos > 0]
         annotated, context = annotate_high_ni(
-            curve.x, curve.y, result.peaks,
+            x, y, angular_peaks,
             wavelength=wavelength, dataset_id=dataset_id,
         )
         by_index = {a.index: a for a in annotated}
@@ -721,12 +816,12 @@ class Engine:
             # candidates 此前在这一步被丢掉,前端只能显示"贡献 0%"。
             peak.dominance = ann.dominance
             peak.hkl_candidates = ann.candidates or None
-        return context.as_dict() if context else None
+        return dict(context.as_dict(), wavelength=wavelength) if context else None
 
     def _dataset_wavelength(self, dataset_id: int) -> float:
         """数据集所属样品的波长,缺省 Cu Kα。"""
         row = self.db.query_one(
-            """SELECT s.wavelength AS wavelength FROM datasets d
+            """SELECT COALESCE(d.acquisition_wavelength, s.wavelength) AS wavelength FROM datasets d
                JOIN samples s ON d.sample_id = s.id
                WHERE d.id = ?""",
             (dataset_id,),
@@ -757,25 +852,32 @@ class Engine:
         curve = self._load_dataset_curve(analysis["dataset_id"])
         params = params_from_json(json.loads(analysis["pipeline_json"]))
         result = run_pipeline(curve, params)
-        annotation = self._annotate_pipeline_peaks(result, int(analysis["dataset_id"]))
-        self.db.execute("DELETE FROM peaks WHERE analysis_id = ?", (analysis["id"],))
-        self._insert_peaks(analysis["id"], result.peaks)
-        # 检测也是一次完整标注 —— 同步固化 annotation_json,否则只有
-        # detect 过的谱重启后有 hkl 却没有"标注依据"卡(context 丢失)。
-        saved = self._save_annotation(
-            analysis["id"], annotation,
-            json.loads(analysis["pipeline_json"] or "{}"), result.peaks,
-        )
+        annotation = None
+        if self._load_annotation(analysis["id"]) or p.get("annotate", False):
+            annotation = self._annotate_pipeline_peaks(result, int(analysis["dataset_id"]))
+        with self.db.transaction():
+            self.db.execute("DELETE FROM peaks WHERE analysis_id = ?", (analysis["id"],))
+            self._insert_peaks(analysis["id"], result.peaks)
+            # 检测也是一次完整标注 —— 同步固化 annotation_json,否则只有
+            # detect 过的谱重启后有 hkl 却没有"标注依据"卡(context 丢失)。
+            saved = self._save_annotation(
+                analysis["id"], annotation,
+                json.loads(analysis["pipeline_json"] or "{}"), result.peaks,
+            )
         return {
             "peaks": [pk.to_dict() for pk in result.peaks],
             "annotation": saved,
         }
 
     def _cmd_peaks_list(self, p: dict) -> dict:
+        analysis = self.db.query_one("SELECT * FROM analyses WHERE id = ?", (p["analysis_id"],))
+        if analysis is None or not self._peaks_current(analysis):
+            return {"peaks": []}
         rows = self.db.query_all(
             "SELECT * FROM peaks WHERE analysis_id = ? ORDER BY position",
             (p["analysis_id"],),
         )
+        verified = self._load_annotation(p["analysis_id"]) is not None
         return {
             "peaks": [
                 {
@@ -785,10 +887,10 @@ class Engine:
                     "area": r["area"], "left_bound": r["left_bound"],
                     "right_bound": r["right_bound"],
                     "manual_override": bool(r["manual_override"]),
-                    "hkl": r["hkl"],
-                    "hkl_confidence": r["hkl_confidence"],
-                    "dominance": r["dominance"],
-                    "hkl_candidates": _load_candidates(r["hkl_candidates"]),
+                    "hkl": r["hkl"] if verified else None,
+                    "hkl_confidence": r["hkl_confidence"] if verified else None,
+                    "dominance": r["dominance"] if verified else None,
+                    "hkl_candidates": _load_candidates(r["hkl_candidates"]) if verified else [],
                 }
                 for i, r in enumerate(rows)
             ]
@@ -859,47 +961,50 @@ class Engine:
         # UPDATE 匹配 0 行**且不报错** —— 命令仍然返回 count>0,前端仍
         # 从返回值里合并出正确的标签,只有重新加载 / 导出 CSV 时才暴露出
         # 数据库里根本没有写进去。用主键就不存在这个问题。
-        existing = self.db.query_all(
-            "SELECT id, position FROM peaks WHERE analysis_id = ? ORDER BY id",
-            (analysis["id"],),
-        )
-        if not existing:
-            # peaks 表为空(用户没先点"检测峰",或参数变更后行被 commit
-            # 删除):只 UPDATE 会一行都写不进去,标注从不落库。这里改为
-            # 与 detect 相同的全量 INSERT,保证 annotate 单独调用也能存。
-            self._insert_peaks(analysis["id"], result.peaks)
-            updated = len(result.peaks)
-        else:
-            # 同一 analysis 下 peaks 表与本次 pipeline 结果一一对应(pipeline
-            # 是确定性的,同一参数必然得到同一批峰)。按位置排序后配对,避免
-            # 依赖 id 与 index 恰好相等。
-            by_position = sorted(existing, key=lambda r: r["position"])
-            ordered_peaks = sorted(result.peaks, key=lambda pk: pk.position)
-            updated = 0
-            for row, peak in zip(by_position, ordered_peaks, strict=False):
-                self.db.execute(
-                    """UPDATE peaks SET hkl = ?, hkl_confidence = ?,
-                              dominance = ?, hkl_candidates = ?,
-                              updated_at = datetime('now')
-                       WHERE id = ?""",
-                    (
-                        peak.hkl, peak.hkl_confidence,
-                        peak.dominance, _dump_candidates(peak.hkl_candidates),
-                        row["id"],
-                    ),
-                )
-                updated += 1
+        with self.db.transaction():
+            existing = self.db.query_all(
+                "SELECT id, position FROM peaks WHERE analysis_id = ? ORDER BY id",
+                (analysis["id"],),
+            )
+            if existing and not self._peaks_current(analysis):
+                self.db.execute("DELETE FROM peaks WHERE analysis_id = ?", (analysis["id"],))
+                existing = []
+            if not existing:
+                # peaks 表为空(用户没先点"检测峰",或参数变更后行被 commit
+                # 删除):只 UPDATE 会一行都写不进去,标注从不落库。这里改为
+                # 与 detect 相同的全量 INSERT,保证 annotate 单独调用也能存。
+                self._insert_peaks(analysis["id"], result.peaks)
+                updated = len(result.peaks)
+            else:
+                # 同一 analysis 下 peaks 表与本次 pipeline 结果一一对应(pipeline
+                # 是确定性的,同一参数必然得到同一批峰)。按位置排序后配对,避免
+                # 依赖 id 与 index 恰好相等。
+                by_position = sorted(existing, key=lambda r: r["position"])
+                ordered_peaks = sorted(result.peaks, key=lambda pk: pk.position)
+                updated = 0
+                for row, peak in zip(by_position, ordered_peaks, strict=False):
+                    self.db.execute(
+                        """UPDATE peaks SET hkl = ?, hkl_confidence = ?,
+                                  dominance = ?, hkl_candidates = ?,
+                                  updated_at = datetime('now')
+                           WHERE id = ?""",
+                        (
+                            peak.hkl, peak.hkl_confidence,
+                            peak.dominance, _dump_candidates(peak.hkl_candidates),
+                            row["id"],
+                        ),
+                    )
+                    updated += 1
 
-        # 点「标注晶面」= 权威刷新:固化 annotation_json(覆盖旧快照,
-        # pipelineHash 随之更新,前端 stale 徽标自然清除)。
-        try:
-            pipeline = json.loads(analysis["pipeline_json"] or "{}")
-        except json.JSONDecodeError:
-            pipeline = {}
-        saved = self._save_annotation(
-            analysis["id"], context, pipeline, result.peaks
-        )
-
+            # 点「标注晶面」= 权威刷新:固化 annotation_json(覆盖旧快照,
+            # pipelineHash 随之更新,前端 stale 徽标自然清除)。
+            try:
+                pipeline = json.loads(analysis["pipeline_json"] or "{}")
+            except json.JSONDecodeError:
+                pipeline = {}
+            saved = self._save_annotation(
+                analysis["id"], context, pipeline, result.peaks
+            )
         annotated = [
             {
                 "index": pk.index,
@@ -913,6 +1018,7 @@ class Engine:
         ]
         return {
             "annotated": annotated,
+            "peaks": self._cmd_peaks_list({"analysis_id": analysis["id"]})["peaks"],
             "count": sum(1 for pk in result.peaks if pk.hkl),
             "updated": updated,
             "annotation": saved if saved is not None else context,
@@ -966,7 +1072,8 @@ class Engine:
             analysis = self._active_analysis(int(dataset_id))
 
         dataset = self.db.query_one(
-               """SELECT d.*, s.name AS sample_name, s.wavelength AS wavelength,
+               """SELECT d.*, s.name AS sample_name,
+                         COALESCE(d.acquisition_wavelength, s.wavelength, 1.5418) AS wavelength,
                          p.name AS project_name
                FROM datasets d
                JOIN samples s ON d.sample_id = s.id
@@ -1012,7 +1119,8 @@ class Engine:
             "SELECT * FROM peaks WHERE analysis_id = ? ORDER BY position",
             (analysis["id"],),
         )
-        if rows:
+        if rows and self._peaks_current(analysis):
+            verified = self._load_annotation(analysis["id"]) is not None
             peaks = [
                 {
                     "peak_index": i,
@@ -1026,7 +1134,7 @@ class Engine:
                         round(float(r["position"]), 8)
                     ),
                     "manual_override": bool(r["manual_override"]),
-                    "hkl": r["hkl"],
+                    "hkl": r["hkl"] if verified else None,
                 }
                 for i, r in enumerate(rows)
             ]
@@ -1129,6 +1237,8 @@ class Engine:
             dataset, analysis = self._export_context(p)
             params = params_from_json(json.loads(analysis["pipeline_json"] or "{}"))
             provenance = self._export_metadata(dataset, analysis, params)
+        elif isinstance(p.get("cex_dqdv"), dict):
+            provenance = [json.dumps(p["cex_dqdv"], ensure_ascii=False, indent=2)]
 
         target = self._export_target(
             p.get("path"),
@@ -1248,10 +1358,12 @@ class Engine:
                 raise EngineError("Analysis 不存在")
 
         row = self.db.query_one(
-            """SELECT dr.*, d.file_hash AS current_hash
+            """SELECT dr.*, d.file_hash AS current_hash, d.x_axis_type, a.pipeline_json, a.preset_id,
+                      COALESCE(d.acquisition_wavelength, s.wavelength, 1.5418) AS wavelength
                FROM domain_results dr
                JOIN analyses a ON dr.analysis_id = a.id
                JOIN datasets d ON a.dataset_id = d.id
+               JOIN samples s ON s.id = d.sample_id
                WHERE dr.analysis_id = ? AND dr.domain = ?
                ORDER BY dr.id DESC LIMIT 1""",
             (analysis["id"], "high_ni_layered"),
@@ -1268,21 +1380,21 @@ class Engine:
 
         stored_hash = row["source_hash"] or ""
         current_hash = row["current_hash"] or ""
-        stale = bool(stored_hash and current_hash and stored_hash != current_hash)
+        stale = bool(stored_hash and current_hash and stored_hash != current_hash) or _stale_domain(result, row)
         return {"found": True, "result": result, "stale": stale}
 
     def _cmd_domain_high_ni_analyze(self, p: dict) -> dict:
         dataset, analysis = self._export_context(p)
         profile_id = p.get("profile_id")
         if profile_id is None:
-            profile = default_profile()
+            profile = default_profile(dataset["wavelength"])
         else:
             row = self.db.query_one(
                 "SELECT * FROM material_profiles WHERE id = ?", (profile_id,)
             )
             if row is None:
                 raise EngineError("材料档案不存在")
-            profile = self._profile_from_row(row)
+            profile = replace(self._profile_from_row(row), wavelength=dataset["wavelength"])
 
         raw_curve = self._load_dataset_curve(dataset["id"])
         saved_pipeline = json.loads(analysis["pipeline_json"] or "{}")
@@ -1296,10 +1408,8 @@ class Engine:
         try:
             from ..peaks.annotate import _cached_fit
 
-            fit = _cached_fit(
-                raw_curve.x, raw_curve.y,
-                float(profile.wavelength), int(dataset["id"]),
-            )
+            x, y, _warnings = as_two_theta(raw_curve)
+            fit = _cached_fit(x, y, profile.wavelength, int(dataset["id"])) if x.size >= 16 else None
         except Exception:  # 精修失败不能拖垮整个分析
             fit = None
 
@@ -1322,6 +1432,9 @@ class Engine:
             source_hash=dataset["file_hash"],
             cell=cell,
         )
+        result["wavelength"] = profile.wavelength
+        result["pipelineHash"] = _pipeline_hash(p.get("pipeline") or saved_pipeline)
+        result["axisConversionVersion"] = 1
         result["analysisId"] = analysis["id"]
         result["processingWarnings"] = processed.warnings
 
@@ -1341,23 +1454,24 @@ class Engine:
                 "source": "refine_cell",
             }
 
-        self.db.execute(
-            "DELETE FROM domain_results WHERE analysis_id = ? AND domain = ?",
-            (analysis["id"], "high_ni_layered"),
-        )
-        self.db.insert(
-            """INSERT INTO domain_results
-               (analysis_id, profile_id, domain, result_json, warnings_json, source_hash)
-               VALUES (?,?,?,?,?,?)""",
-            (
-                analysis["id"],
-                profile_id,
-                "high_ni_layered",
-                json.dumps(result, ensure_ascii=False),
-                json.dumps(result.get("warnings", []), ensure_ascii=False),
-                dataset["file_hash"],
-            ),
-        )
+        with self.db.transaction():
+            self.db.execute(
+                "DELETE FROM domain_results WHERE analysis_id = ? AND domain = ?",
+                (analysis["id"], "high_ni_layered"),
+            )
+            self.db.insert(
+                """INSERT INTO domain_results
+                   (analysis_id, profile_id, domain, result_json, warnings_json, source_hash)
+                   VALUES (?,?,?,?,?,?)""",
+                (
+                    analysis["id"],
+                    profile_id,
+                    "high_ni_layered",
+                    json.dumps(result, ensure_ascii=False),
+                    json.dumps(result.get("warnings", []), ensure_ascii=False),
+                    dataset["file_hash"],
+                ),
+            )
         return result
 
     # ---------- presets(§8.2 支撑场景 S5)----------
@@ -1405,17 +1519,25 @@ class Engine:
         )
         if preset is None:
             raise EngineError("Preset 不存在")
-        dataset_ids = p.get("dataset_ids") or []
-        applied = 0
-        for ds_id in dataset_ids:
-            analysis = self._active_analysis(ds_id)
-            self.db.execute(
-                """UPDATE analyses SET pipeline_json = ?, preset_id = ?,
-                       updated_at = datetime('now') WHERE id = ?""",
-                (preset["pipeline_json"], preset["id"], analysis["id"]),
-            )
-            applied += 1
-        return {"applied": applied}
+        dataset_ids = list(dict.fromkeys(p.get("dataset_ids") or []))
+        pipeline = json.loads(preset["pipeline_json"])
+        params = params_from_json(pipeline)
+        with self.db.transaction() as conn:
+            for ds_id in dataset_ids:
+                analysis = conn.execute(
+                    """SELECT a.* FROM analyses a JOIN datasets d ON d.id = a.dataset_id
+                       JOIN samples s ON s.id = d.sample_id
+                       WHERE a.dataset_id = ? AND a.is_active = 1 AND s.project_id = ?
+                         AND d.deleted_at IS NULL AND s.deleted_at IS NULL""",
+                    (ds_id, preset["project_id"]),
+                ).fetchone()
+                if analysis is None:
+                    raise EngineError("所选数据集不属于当前项目或已删除")
+                report = validate_params(self._load_dataset_curve(ds_id), params)
+                if not report.ok:
+                    raise EngineError(f"数据集 {ds_id} 无法应用预设", "；".join(report.errors))
+                self._write_pipeline(conn, analysis, pipeline, preset["id"])
+        return {"applied": len(dataset_ids)}
 
     # ---------- library meta ----------
 
@@ -1533,7 +1655,8 @@ class Engine:
 
         rows = self.db.query_all(
             """SELECT d.id, d.name, s.name AS sample_name,
-                      s.temperature, s.batch,
+                      s.temperature, s.batch, d.x_axis_type, a.pipeline_json, a.preset_id,
+                      COALESCE(d.acquisition_wavelength, s.wavelength, 1.5418) AS wavelength,
                       dr.result_json
                FROM datasets d
                JOIN samples s ON d.sample_id = s.id
@@ -1554,7 +1677,7 @@ class Engine:
                     stored = json.loads(row["result_json"])
                 except json.JSONDecodeError:
                     stored = None
-                if isinstance(stored, dict):
+                if isinstance(stored, dict) and not _stale_domain(stored, row):
                     metrics = _trend_metrics(stored)
             datasets.append({
                 "id": row["id"],
@@ -1662,10 +1785,7 @@ class Engine:
     def _cmd_meta_file_path(self, p: dict) -> dict:
         """文件型对象的实际磁盘路径(前端右键"在资源管理器中显示")。
 
-        只有 datasets / ec_cells 有文件;原文件(source_path)优先 ——
-        用户"要数据"时要的是自己目录里那份;原文件已不在(挪走/优盘拔了)
-        回落到库内副本。两处都没有才报错,不返回假路径让 explorer 弹窗。
-        回收站里的对象也允许定位(只读操作,且用户可能正想去删源文件)。
+        明确指定 stored 或 source 时只定位该份文件。省略 kind 保留旧客户端行为。
         """
         table = p.get("table")
         if table not in ("datasets", "ec_cells"):
@@ -1677,13 +1797,21 @@ class Engine:
         if row is None:
             raise EngineError("对象不存在")
         src = (row["source_path"] or "").strip()
-        if src and Path(src).exists():
-            return {"path": src, "kind": "source"}
+        kind = p.get("kind")
+        if kind not in (None, "source", "stored"):
+            raise EngineError("未知的文件位置")
+        if kind != "stored":
+            if src and Path(src).is_file():
+                return {"path": src, "kind": "source"}
+            if kind == "source":
+                raise EngineError(f"找不到原始文件，导入时的路径为：{src}" if src else "没有记录原始导入路径")
         stored_rel = (row["stored_path"] or "").strip()
         if stored_rel:
             stored = self.store.abs_path(stored_rel)
-            if stored.exists():
+            if stored.is_file():
                 return {"path": str(stored), "kind": "stored"}
+        if kind == "stored":
+            raise EngineError("找不到项目副本，请检查项目库中的文件")
         raise EngineError("文件已找不到(原文件与库内副本都不在)")
 
     def _cmd_meta_paths(self, p: dict) -> dict:
@@ -1693,7 +1821,7 @@ class Engine:
         不能让人自己去翻 %LOCALAPPDATA%。
         """
         data_root = Path(self.store.root)
-        log = data_root / "logs" / "engine.log"
+        log = self.log_dir / "engine.log"
         return {
             "dataRoot": str(data_root),
             "logFile": str(log),
@@ -1816,67 +1944,32 @@ class Engine:
         if row["deleted_at"] is None:
             raise EngineError("只能彻底删除回收站中的对象")
 
-        # 先取 stored_path,再删 DB 行(行删了就查不到了)
-        stored = [r["stored_path"] for r in self.db.dataset_ids_of(table, row_id)]
-        ds_ids = [r["id"] for r in self.db.dataset_ids_of(table, row_id)]
-        if table == "datasets":
-            self.db.purge_dataset(row_id)
-        elif table == "ec_cells":
-            stored = self._ec_purge_paths(stored)
-            self.db.purge_ec_cell(row_id)
-        elif table == "samples":
-            stored.extend(self._ec_purge_paths(
-                [r["stored_path"] for r in self.db.query_all(
-                    "SELECT stored_path FROM ec_cells WHERE sample_id = ?", (row_id,))]
-            ))
-            self.db.purge_sample(row_id)
-        else:
-            self.db.purge_project(row_id)
-        self._remove_files(stored, ds_ids)
-        return {"id": row_id, "kind": table, "removedFiles": len(stored)}
+        removed = self._purge_entry(table, row_id)
+        return {"id": row_id, "kind": table, "removedFiles": removed}
 
     def _purge_all(self) -> dict:
         """清空回收站。必须由深到浅处理,否则删了父级就找不到子级了。"""
         rows = self.db.trash_rows(limit=100000)
         order = {"datasets": 0, "ec_cells": 0, "batches": 0, "samples": 1, "projects": 2}
         ordered = sorted(rows, key=lambda r: order[r["kind"]])
-        removed, count = 0, 0
-        for r in ordered:
-            table, row_id = r["kind"], r["id"]
-            stored = [x["stored_path"] for x in self.db.dataset_ids_of(table, row_id)]
-            ds_ids = [x["id"] for x in self.db.dataset_ids_of(table, row_id)]
-            if table == "datasets":
-                self.db.purge_dataset(row_id)
-            elif table == "ec_cells":
-                stored = self._ec_purge_paths(stored)
-                self.db.purge_ec_cell(row_id)
-            elif table == "samples":
-                stored.extend(self._ec_purge_paths(
-                    [x["stored_path"] for x in self.db.query_all(
-                        "SELECT stored_path FROM ec_cells WHERE sample_id = ?",
-                        (row_id,))]
-                ))
-                self.db.purge_sample(row_id)
-            else:
-                self.db.purge_project(row_id)
-            removed += self._remove_files(stored, ds_ids)
-            count += 1
-        return {"purged": count, "removedFiles": removed}
+        removed = sum(self._purge_entry(r["kind"], r["id"]) for r in ordered)
+        return {"purged": len(ordered), "removedFiles": removed}
 
-    def _ec_purge_paths(self, stored: list[str]) -> list[str]:
-        """ec stored_path → 同目录全部文件(原始 + records.npz + dqdv_*.npz)。"""
-        out: list[str] = []
-        for path in stored:
-            out.append(path)
-            with contextlib.suppress(Exception):
-                parent = self.store.abs_path(path).parent
-                rel = parent.relative_to(self.store.root)
-                self_rel = f"{rel.as_posix()}/{Path(path).name}"
-                for f in parent.iterdir():
-                    entry = f"{rel.as_posix()}/{f.name}"
-                    if entry != self_rel:
-                        out.append(entry)
-        return out
+    def _purge_entry(self, table: str, row_id: int) -> int:
+        with self.db.transaction() as conn:
+            ds_rows = self.db.dataset_ids_of(table, row_id) if table != "ec_cells" else []
+            ds_ids = [row["id"] for row in ds_rows]
+            if table == "ec_cells":
+                stored = self.db.purge_ec_cell(row_id)
+            elif table == "samples":
+                stored = self.db.purge_sample(row_id)
+            elif table == "projects":
+                stored = self.db.purge_project(row_id)
+            else:
+                stored = [path for ds_id in ds_ids if (path := self.db.purge_dataset(ds_id)) is not None]
+                if table == "batches":
+                    conn.execute("DELETE FROM batches WHERE id=?", (row_id,))
+        return self._remove_files(stored, ds_ids)
 
     def _remove_files(self, stored: list[str], ds_ids: list[int]) -> int:
         """删磁盘副本。**失败只忽略,不抛异常** —— 此时 DB 行已经删了,
@@ -1900,680 +1993,62 @@ class Engine:
         clear_stage_cache()
         return removed
 
-    # ---------- ec(电化学 LAND)----------
+    # ---------- cex(蓝电原始数据)----------
 
-    def _ec_cell_row(self, cell_id) -> Any:
-        row = self.db.query_one(
-            "SELECT * FROM ec_cells WHERE id = ? AND deleted_at IS NULL",
-            (cell_id,),
-        )
-        if row is None:
-            raise EngineError("电化学数据(电池)不存在或已在回收站中")
-        return row
+    def _cmd_cex_scan_folder(self, p: dict) -> dict:
+        return self.cex.scan_folder(p)
 
-    def _ec_records_path(self, stored_path: str) -> Path:
-        """原始文件同目录下的解析缓存(records.npz,导入时写入)。"""
-        return self.store.abs_path(stored_path).parent / "records.npz"
+    def _cmd_cex_open(self, p: dict) -> dict:
+        return self.cex.open(p)
 
-    def _ec_load_records(self, stored_path: str) -> dict:
-        path = self._ec_records_path(stored_path)
-        if not path.exists():
-            raise EngineError("解析缓存缺失,请重新导入该文件")
-        with np.load(path) as z:
-            return {k: z[k] for k in ("t", "i", "v", "cycle", "state")}
+    def _cmd_cex_close(self, p: dict) -> dict:
+        self.cex.close_document(p["id"])
+        return {}
 
-    @staticmethod
-    def _ec_hash(params: dict) -> str:
-        raw = json.dumps(params or {}, sort_keys=True, ensure_ascii=False)
-        return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+    def _cmd_cex_page(self, p: dict) -> dict:
+        return self.cex.page(p)
 
-    def _cmd_ec_preview(self, p: dict) -> dict:
-        """dry-run 解析:不复制不落库,给导入向导展示 QA/圈概览。
+    def _cmd_cex_locate(self, p: dict) -> dict:
+        return self.cex.locate(p)
 
-        大文件(20MB xlsx)解析约 20 秒,前端应显示"正在解析"提示。
-        payload: {path}
-        """
-        from ..electrochem import LandParseError, parse_land_path
+    def _cmd_cex_plot(self, p: dict) -> dict:
+        return self.cex.plot(p)
 
-        path = str(p.get("path") or "")
-        if not path:
-            raise EngineError("必须提供 path")
-        try:
-            lf = parse_land_path(path)
-        except LandParseError as exc:
-            raise EngineError(str(exc)) from exc
-        cycles = [
-            {
-                "index": c.index, "q_charge": round(c.q_charge, 4),
-                "q_discharge": round(c.q_discharge, 4),
-                "ce": round(c.ce, 4), "rate_group": c.rate_group,
-                "incomplete": c.incomplete,
-            }
-            for c in lf.cycles
-        ]
-        return {
-            "file": Path(path).name,
-            "session": {
-                "test_name": lf.session.test_name,
-                "channel": lf.session.channel,
-                "start_time": lf.session.start_time,
-                "end_time": lf.session.end_time,
-                "program": lf.session.program,
-            },
-            "qa": self._ec_qa_json(lf.qa),
-            "n_cycles": len(cycles),
-            "cycles_preview": cycles[:8] + (cycles[-3:] if len(cycles) > 11 else []),
-            "mass_mg_estimate": lf.qa.get("mass_mg_estimate"),
-        }
+    def _cmd_cex_compare(self, p: dict) -> dict:
+        return self.cex.compare(p)
 
-    @staticmethod
-    def _ec_qa_json(qa: dict) -> dict:
-        """QA dict → 可 JSON 负载(数组转 list,补默认)。"""
-        out = dict(qa)
-        for key, value in list(out.items()):
-            if isinstance(value, dict):
-                out[key] = {k: v for k, v in value.items()}
-            elif isinstance(value, (np.floating, np.integer)):
-                out[key] = float(value)
-        return out
+    def _cmd_cex_archive(self, p: dict) -> dict:
+        return self.cex.archive(p)
 
-    def _cmd_ec_import(self, p: dict) -> dict:
-        """导入 LAND 文件(归属三选一,与 datasets.import 同构)。
+    def _cmd_cex_export(self, p: dict) -> dict:
+        return self.cex.export(p)
 
-        payload: {paths, project_id, sample_id?, new_sample?: {name,...},
-                  active_mass_mg?, import_anyway?}
-        导入即解析:原始文件复制进 Data Store,解析结果存 records.npz
-        (后续打开 cell 秒级加载,不再重解析 20 秒)。
-        """
-        from ..electrochem import LandParseError, parse_land_path
+    def _cmd_cex_dqdv(self, p: dict) -> dict:
+        return self.cex.dqdv(p)
 
-        paths = p.get("paths") or []
-        if not paths:
-            raise EngineError("没有指定要导入的文件")
-        project_id = p.get("project_id")
-        if self.db.query_one(
-            "SELECT id FROM projects WHERE id = ? AND deleted_at IS NULL",
-            (project_id,),
-        ) is None:
-            raise EngineError("目标 Project 不存在")
+    def _cmd_cex_dqdv_source(self, p: dict) -> dict:
+        return self.cex.dqdv_source(p)
 
-        sample_id = p.get("sample_id")
-        if sample_id is None:
-            ns = p.get("new_sample") or {}
-            name = (ns.get("name") or "").strip()
-            if not name:
-                raise EngineError("新样品必须填写 Sample Name")
-            sample_id = self.db.insert(
-                """INSERT INTO samples (project_id, name, material)
-                   VALUES (?,?,?)""",
-                (project_id, name, str(ns.get("material", ""))),
-            )
-        elif self.db.query_one(
-            "SELECT id FROM samples WHERE id = ? AND deleted_at IS NULL",
-            (sample_id,),
-        ) is None:
-            raise EngineError("目标 Sample 不存在")
+    def _cmd_cex_dqdv_export(self, p: dict) -> dict:
+        target = self._export_target(p.get("path"), "cex_dqdv.csv", bool(p.get("overwrite")))
+        return self.cex.export_dqdv(target, p.get("columns"), p.get("rows"))
 
-        imported, duplicates, failures = [], [], []
-        for path in paths:
-            file_hash = sha256_of_file(Path(path))
-            dup = self.db.query_one(
-                "SELECT id, name FROM ec_cells WHERE file_hash = ? AND deleted_at IS NULL",
-                (file_hash,),
-            )
-            if dup is not None and not p.get("import_anyway"):
-                duplicates.append({"path": str(path), "cellId": dup["id"], "name": dup["name"]})
-                continue
-            try:
-                lf = parse_land_path(path)
-            except LandParseError as exc:
-                failures.append({"path": str(path), "reason": str(exc)})
-                continue
+    def _cmd_cex_dqdv_export_curves(self, p: dict) -> dict:
+        target = self._export_target(p.get("path"), "cex_dqdv_curves.csv", bool(p.get("overwrite")))
+        return self.cex.export_dqdv_curves(p, target)
 
-            stored, _ = self.store.import_file(path, {"sample_id": sample_id})
-            # 解析缓存:与原始文件同目录,免二次解析
-            np.savez_compressed(
-                self._ec_records_path(stored),
-                t=lf.t, i=lf.i, v=lf.v, cycle=lf.cycle, state=lf.state,
-            )
-            name = Path(path).stem
-            mass = p.get("active_mass_mg") or lf.qa.get("mass_mg_estimate")
-            meta = {
-                "session": {
-                    "test_name": lf.session.test_name,
-                    "channel": lf.session.channel,
-                    "start_time": lf.session.start_time,
-                    "end_time": lf.session.end_time,
-                    "program": lf.session.program,
-                },
-                "qa": self._ec_qa_json(lf.qa),
-            }
-            cell_id = self.db.insert(
-                """INSERT INTO ec_cells
-                   (sample_id, name, original_filename, source_path, stored_path,
-                    file_hash, format, active_mass_mg, meta_json)
-                   VALUES (?,?,?,?,?,?,?,?,?)""",
-                (
-                    sample_id, name, Path(path).name, str(Path(path).resolve()),
-                    stored, file_hash, Path(path).suffix.lower().lstrip("."),
-                    float(mass) if mass else None,
-                    json.dumps(meta, ensure_ascii=False),
-                ),
-            )
-            for c in lf.cycles:
-                self.db.insert(
-                    """INSERT OR IGNORE INTO ec_cycles
-                       (cell_id, cycle_index, q_charge, q_discharge, ce,
-                        i_med_charge, i_med_discharge, v_min, v_max,
-                        rate_group, incomplete)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-                    (
-                        cell_id, c.index, round(c.q_charge, 6), round(c.q_discharge, 6),
-                        round(c.ce, 6), c.i_med_charge, c.i_med_discharge,
-                        c.v_min, c.v_max, c.rate_group, int(c.incomplete),
-                    ),
-                )
-            imported.append({"id": cell_id, "name": name, "n_cycles": len(lf.cycles)})
+    def _cmd_cex_cells(self, p: dict) -> dict:
+        return self.cex.cells(p)
 
-        return {"imported": imported, "duplicates": duplicates, "failures": failures,
-                "sampleId": sample_id}
-
-    def _cmd_ec_cells(self, p: dict) -> dict:
-        """样品下的电化学 cell 列表(供 Library 侧栏)。"""
-        sample_id = p.get("sample_id")
-        rows = self.db.query_all(
-            """SELECT id, name, original_filename, active_mass_mg, format,
-                      imported_at,
-                      (SELECT COUNT(*) FROM ec_cycles c
-                       WHERE c.cell_id = ec_cells.id) AS cycle_count,
-                      (SELECT MAX(cycle_index) FROM ec_cycles c
-                       WHERE c.cell_id = ec_cells.id) AS last_cycle
-               FROM ec_cells
-               WHERE sample_id = ? AND deleted_at IS NULL
-               ORDER BY name""",
-            (sample_id,),
-        )
-        return {"cells": [
-            {
-                "id": r["id"], "name": r["name"],
-                "filename": r["original_filename"],
-                "massMg": r["active_mass_mg"], "format": r["format"],
-                "cycleCount": r["cycle_count"], "lastCycle": r["last_cycle"],
-                "importedAt": r["imported_at"],
-            } for r in rows
-        ]}
-
-    def _cmd_ec_cell_overview(self, p: dict) -> dict:
-        """cell 详情:元信息 + 全部圈统计(趋势图数据源)。"""
-        cell = self._ec_cell_row(p.get("cell_id"))
-        rows = self.db.query_all(
-            """SELECT cycle_index, q_charge, q_discharge, ce, i_med_charge,
-                      v_min, v_max, rate_group, incomplete
-               FROM ec_cycles WHERE cell_id = ? ORDER BY cycle_index""",
-            (cell["id"],),
-        )
-        try:
-            meta = json.loads(cell["meta_json"] or "{}")
-        except json.JSONDecodeError:
-            meta = {}
-        return {
-            "id": cell["id"], "name": cell["name"],
-            "filename": cell["original_filename"],
-            "massMg": cell["active_mass_mg"],
-            "session": meta.get("session", {}),
-            "qa": meta.get("qa", {}),
-            "cycles": [
-                {
-                    "cycle": r["cycle_index"], "qCharge": r["q_charge"],
-                    "qDischarge": r["q_discharge"], "ce": r["ce"],
-                    "iMedCharge": r["i_med_charge"],
-                    "vMin": r["v_min"], "vMax": r["v_max"],
-                    "rateGroup": r["rate_group"], "incomplete": bool(r["incomplete"]),
-                } for r in rows
-            ],
-        }
-
-    def _cmd_ec_dqdv_compute(self, p: dict) -> dict:
-        """计算全 cell 的 dQ/dV + 峰检测 + 轨迹(显式触发,结果持久化)。
-
-        参数变更不自动重算:再点一次本命令(前端配"已过期"徽标)。
-        曲线数组存 data 目录 dqdv_<hash>.npz;峰/轨迹存 ec_analyses。
-        payload: {cell_id, params?: {dv_mv, sg_window, sg_poly, v_min, v_max,
-                  mass_mg?, windows?: [{key,label,v_lo,v_hi}], peak?: {...}}}
-        """
-        from ..electrochem import (
-            DQDVParams,
-            PeakParams,
-            PeakWindow,
-            build_tracks,
-            compute_dqdv,
-            detect_window_peaks,
-        )
-
-        cell = self._ec_cell_row(p.get("cell_id"))
-        raw = p.get("params") or {}
-        windows_raw = raw.get("windows") or []
-        windows = [
-            PeakWindow(w["key"], w.get("label", w["key"]),
-                       float(w["v_lo"]), float(w["v_hi"]))
-            for w in windows_raw
-        ] or None
-        peak_raw = raw.get("peak") or {}
-        unknown = [k for k in peak_raw if k not in PeakParams.__dataclass_fields__ or k == "windows"]
-        if unknown:
-            # 静默丢弃 = 拼错的参数不生效且 params_hash 不变,用户以为改了
-            raise EngineError(f"未知的 peak 参数: {unknown}")
-        peak_kwargs = {k: v for k, v in peak_raw.items() if k != "windows"}
-        if windows is not None:
-            peak_kwargs["windows"] = windows
-        peak_params = PeakParams(**peak_kwargs) if peak_kwargs else PeakParams()
-        try:
-            peak_params.validate()
-        except ValueError as exc:
-            raise EngineError(f"peak 参数非法:{exc}") from exc
-        dq = DQDVParams(
-            dv_mv=float(raw.get("dv_mv", 2.0)),
-            sg_window=int(raw.get("sg_window", 11)),
-            sg_poly=int(raw.get("sg_poly", 3)),
-            v_min=float(raw.get("v_min", 2.9)),
-            v_max=float(raw.get("v_max", 4.32)),
-            mass_mg=float(raw.get("mass_mg") or cell["active_mass_mg"] or 0) or None,
-        )
-        params_json = json.dumps(
-            {
-                "dv_mv": dq.dv_mv, "sg_window": dq.sg_window, "sg_poly": dq.sg_poly,
-                "v_min": dq.v_min, "v_max": dq.v_max, "mass_mg": dq.mass_mg,
-                "windows": [
-                    {"key": w.key, "label": w.label, "v_lo": w.v_lo, "v_hi": w.v_hi}
-                    for w in peak_params.windows
-                ],
-                "peak": {
-                    k: getattr(peak_params, k) for k in PeakParams.__dataclass_fields__
-                    if k != "windows"
-                },
-            },
-            ensure_ascii=False, sort_keys=True,
-        )
-        params_hash = self._ec_hash(json.loads(params_json))
-
-        rec = self._ec_load_records(cell["stored_path"])
-        cycles = self.db.query_all(
-            "SELECT cycle_index, incomplete FROM ec_cycles WHERE cell_id = ?",
-            (cell["id"],),
-        )
-        all_peaks, curves, index = [], {}, []
-        # 曲线只取恒流段(CV 恒压段电压几乎不动,混进 dQ/dV 会在截止电压
-        # 处堆出假尖峰);但**容量口径必须含 CV** —— CCCV 协议下恒压段
-        # 可占大半充电容量,只积恒流会让 qTotal 与循环表对不上。
-        curve_codes = {"charge": (1,), "discharge": (2,)}
-        cap_codes = {"charge": (1, 3), "discharge": (2,)}
-        cap_scale = 1000.0 / dq.mass_mg if dq.mass_mg else 1.0
-        for row in cycles:
-            if row["incomplete"]:
-                continue
-            n = int(row["cycle_index"])
-            for direction in ("charge", "discharge"):
-                mask = (rec["cycle"] == n) & np.isin(rec["state"], curve_codes[direction])
-                try:
-                    res = compute_dqdv(
-                        rec["t"][mask], rec["i"][mask], rec["v"][mask],
-                        direction, dq,
-                    )
-                except ValueError:
-                    continue
-                cap_mask = (rec["cycle"] == n) & np.isin(rec["state"], cap_codes[direction])
-                tt, ii = rec["t"][cap_mask], rec["i"][cap_mask]
-                if tt.size >= 2:
-                    dtc = np.diff(tt)
-                    dtc = np.where(dtc > 0, dtc, 0.0)
-                    q_total = float(np.abs(np.sum(0.5 * (ii[1:] + ii[:-1]) * dtc)) / 3600.0)
-                    q_total *= cap_scale
-                else:
-                    q_total = res.q_total
-                key = f"c{n}_{direction}"
-                curves[f"v_{key}"] = res.v
-                curves[f"y_{key}"] = res.dqdv
-                index.append({"cycle": n, "direction": direction, "qTotal": q_total})
-                for w in peak_params.windows:
-                    all_peaks.extend(detect_window_peaks(res, w, peak_params, cycle=n))
-        if not curves:
-            raise EngineError("该数据没有可计算 dQ/dV 的恒流段")
-        tracks = build_tracks(all_peaks, peak_params,
-                              {w.key: w.label for w in peak_params.windows})
-        curves["index"] = np.frombuffer(
-            json.dumps(index, ensure_ascii=False).encode("utf-8"), dtype=np.uint8
-        )
-        curve_file = f"dqdv_{params_hash}.npz"
-        cell_dir = self.store.abs_path(cell["stored_path"]).parent
-        # 清掉旧参数组合的曲线缓存:每个参数组合一个文件会让磁盘随
-        # 调参次数无限增长(records.npz 是原始数据,不动)
-        for stale in cell_dir.glob("dqdv_*.npz"):
-            if stale.name != curve_file:
-                with contextlib.suppress(OSError):
-                    stale.unlink()
-        np.savez_compressed(cell_dir / curve_file, **curves)
-
-        result = {
-            "curveFile": curve_file,
-            "nCurves": len(index),
-            "nPeaks": len(all_peaks),
-            "nTruncated": sum(1 for pk in all_peaks if pk.truncated),
-            # 每段曲线的容量索引(含 CV 的充电口径)。此前只写进 npz,
-            # 命令层从不返回 —— qTotal 算了没人看,属"做了但没生效"
-            "index": index,
-            "peaks": [pk.to_dict() for pk in all_peaks],
-            "tracks": [tr.to_dict() for tr in tracks],
-        }
-        self._ec_upsert_analysis(cell["id"], "dqdv", params_json, params_hash, result)
-        result["paramsHash"] = params_hash
-        return result
-
-    def _ec_upsert_analysis(self, cell_id: int, kind: str,
-                            params_json: str, params_hash: str, result: dict) -> None:
-        row = self.db.query_one(
-            "SELECT id FROM ec_analyses WHERE cell_id = ? AND kind = ? AND is_active = 1",
-            (cell_id, kind),
-        )
-        payload = json.dumps(result, ensure_ascii=False)
-        if row is None:
-            self.db.insert(
-                """INSERT INTO ec_analyses
-                   (cell_id, kind, params_json, params_hash, result_json)
-                   VALUES (?,?,?,?,?)""",
-                (cell_id, kind, params_json, params_hash, payload),
-            )
-        else:
-            self.db.execute(
-                """UPDATE ec_analyses SET params_json = ?, params_hash = ?,
-                       result_json = ?, updated_at = datetime('now')
-                   WHERE id = ?""",
-                (params_json, params_hash, payload, row["id"]),
-            )
-
-    def _ec_active_analysis(self, cell_id: int, kind: str) -> Any:
-        row = self.db.query_one(
-            """SELECT * FROM ec_analyses
-               WHERE cell_id = ? AND kind = ? AND is_active = 1""",
-            (cell_id, kind),
-        )
-        if row is None:
-            raise EngineError(f"尚未计算{ 'dQ/dV' if kind == 'dqdv' else '归因'},请先执行计算")
-        return row
-
-    def _cmd_ec_dqdv_state(self, p: dict) -> dict:
-        """dQ/dV 分析状态(含当前参数指纹,供前端判"已过期")。"""
-        cell = self._ec_cell_row(p.get("cell_id"))
-        row = self.db.query_one(
-            """SELECT params_hash, updated_at FROM ec_analyses
-               WHERE cell_id = ? AND kind = 'dqdv' AND is_active = 1""",
-            (cell["id"],),
-        )
-        if row is None:
-            return {"computed": False}
-        return {"computed": True, "paramsHash": row["params_hash"],
-                "updatedAt": row["updated_at"]}
-
-    def _cmd_ec_dqdv_result(self, p: dict) -> dict:
-        """读回已持久化的 dQ/dV 分析(峰/轨迹/参数),重启后免重算。
-
-        ec.dqdv_compute 只在计算时返回峰表,而曲线(attribution_get 同理)
-        都有读回路径 —— 峰/轨迹存在 ec_analyses.result_json 里却没有读
-        回命令的话,重开软件峰轨迹页只能显示"请重新计算",数据明明在库里。
-        stale 判定交给前端:比对返回的 params 与当前 UI 参数即可。
-        """
-        cell = self._ec_cell_row(p.get("cell_id"))
-        row = self.db.query_one(
-            """SELECT params_json, params_hash, result_json, updated_at
-               FROM ec_analyses
-               WHERE cell_id = ? AND kind = 'dqdv' AND is_active = 1""",
-            (cell["id"],),
-        )
-        if row is None:
-            return {"computed": False}
-        try:
-            result = json.loads(row["result_json"])
-            params = json.loads(row["params_json"] or "{}")
-        except json.JSONDecodeError:
-            return {"computed": False, "corrupt": True}
-        return {
-            "computed": True,
-            "paramsHash": row["params_hash"],
-            "params": params,
-            "updatedAt": row["updated_at"],
-            "nCurves": result.get("nCurves"),
-            "nPeaks": result.get("nPeaks"),
-            "nTruncated": result.get("nTruncated"),
-            "index": result.get("index", []),
-            "peaks": result.get("peaks", []),
-            "tracks": result.get("tracks", []),
-        }
-
-    def _cmd_ec_dqdv_curve(self, p: dict) -> dict:
-        """取单圈单方向曲线(二进制信封)。payload: {cell_id, cycle, direction}"""
-        cell = self._ec_cell_row(p.get("cell_id"))
-        analysis = self._ec_active_analysis(cell["id"], "dqdv")
-        try:
-            result = json.loads(analysis["result_json"])
-        except json.JSONDecodeError:
-            raise EngineError("dQ/dV 结果损坏,请重新计算") from None
-        key = f"c{int(p['cycle'])}_{p['direction']}"
-        path = self.store.abs_path(cell["stored_path"]).parent / result["curveFile"]
-        if not path.exists():
-            raise EngineError("曲线缓存缺失,请重新计算 dQ/dV")
-        with np.load(path) as z:
-            if f"v_{key}" not in z:
-                raise EngineError("该圈该方向没有曲线(可能是不完整圈或静置段)")
-            v, y = z[f"v_{key}"], z[f"y_{key}"]
-        out: dict[str, Any] = {
-            "cycle": int(p["cycle"]), "direction": p["direction"],
-            "pointCount": int(v.size), "paramsHash": analysis["params_hash"],
-        }
-        header, body = pack_arrays([("v", v), ("dqdv", y)])
-        out[BIN_KEY] = header
-        out["_binary"] = body
-        return out
-
-    def _cmd_ec_dqdv_waterfall(self, p: dict) -> dict:
-        """逐圈瀑布/热图矩阵:每隔 step 圈取样,重采样到公共电压网格。"""
-        cell = self._ec_cell_row(p.get("cell_id"))
-        analysis = self._ec_active_analysis(cell["id"], "dqdv")
-        direction = p.get("direction", "charge")
-        step = max(1, int(p.get("step", 10)))
-        try:
-            result = json.loads(analysis["result_json"])
-        except json.JSONDecodeError:
-            raise EngineError("dQ/dV 结果损坏,请重新计算") from None
-        path = self.store.abs_path(cell["stored_path"]).parent / result["curveFile"]
-        if not path.exists():
-            raise EngineError("曲线缓存缺失,请重新计算 dQ/dV")
-        params = json.loads(analysis["params_json"] or "{}")
-        grid = np.arange(float(params.get("v_min", 2.9)),
-                         float(params.get("v_max", 4.32)) + 1e-9, 0.004)
-        with np.load(path) as z:
-            keys = sorted(
-                (k[2:] for k in z.files if k.startswith("v_")),
-                key=lambda k: int(k.split("_")[0][1:]),
-            )
-            keys = [k for k in keys if k.endswith(f"_{direction}")]
-        sampled, matrix = [], []
-        for k in keys[::step]:
-            n = int(k.split("_")[0][1:])
-            with np.load(path) as z:
-                v, y = z[f"v_{k}"], z[f"y_{k}"]
-            matrix.append(np.interp(grid, v, y, left=np.nan, right=np.nan))
-            sampled.append(n)
-        if not matrix:
-            raise EngineError("没有可用曲线")
-        # v 轴(356 个网格点)走 JSON:信封要求等长数组,矩阵是 v×行
-        # 的展平,两者长度必然不同。矩阵才是大数组,独占二进制体。
-        out: dict[str, Any] = {
-            "cycles": sampled, "direction": direction, "step": step,
-            "shape": [len(sampled), int(grid.size)],
-            "v": [round(float(x), 4) for x in grid],
-            "paramsHash": analysis["params_hash"],
-        }
-        header, body = pack_arrays([
-            ("matrix", np.asarray(matrix, dtype=np.float64).ravel()),
-        ])
-        out[BIN_KEY] = header
-        out["_binary"] = body
-        return out
-
-    def _cmd_ec_attribution_run(self, p: dict) -> dict:
-        """衰减归因(显式触发,依赖当前活跃的 dQ/dV 峰结果)。"""
-        from ..electrochem import AttributionParams, run_attribution
-
-        cell = self._ec_cell_row(p.get("cell_id"))
-        dq = self._ec_active_analysis(cell["id"], "dqdv")
-        try:
-            dq_result = json.loads(dq["result_json"])
-        except json.JSONDecodeError:
-            raise EngineError("dQ/dV 结果损坏,请先重新计算") from None
-        # 容量口径必须与 dQ/dV 峰一致:峰按 (params.mass_mg or cell mass) 缩放,
-        # 这里若只用 cell mass,用户在 dQ/dV 页改过 mass 后两套分量差一个质量比,
-        # 闭合归一化会把错误按比例摊进三分量且看不出来。
-        try:
-            dq_params = json.loads(dq["params_json"] or "{}")
-        except json.JSONDecodeError:
-            dq_params = {}
-        mass = dq_params.get("mass_mg") or cell["active_mass_mg"]
-        scale = 1000.0 / mass if mass else 1.0
-        cycles = [
-            {
-                "index": r["cycle_index"],
-                "q_discharge": (r["q_discharge"] or 0.0) * scale,
-                "q_charge": (r["q_charge"] or 0.0) * scale,
-                "ce": r["ce"] or 0.0,
-                "rate_group": r["rate_group"],
-                "incomplete": bool(r["incomplete"]),
-            }
-            for r in self.db.query_all(
-                "SELECT cycle_index, q_charge, q_discharge, ce, rate_group, "
-                "incomplete FROM ec_cycles WHERE cell_id = ?",
-                (cell["id"],),
-            )
-        ]
-        raw = p.get("params") or {}
-        att_params = AttributionParams(
-            method=str(raw.get("method", "auto")),
-            baseline_cycles=int(raw.get("baseline_cycles", 3)),
-            checkup_group=str(raw.get("checkup_group", "slow")),
-        )
-        # CyclePeak 反序列化:归因只读少数字段,轻量 namedtuple 即可
-        from ..electrochem.peaks import CyclePeak
-
-        peaks = [
-            CyclePeak(
-                cycle=int(pk["cycle"]), direction=pk["direction"],
-                window_key=pk["window"], position=float(pk["position"]),
-                height=float(pk["height"]), area=float(pk["area"]),
-                fwhm=float(pk.get("fwhm") or 0.0),
-                prominence=float(pk.get("prominence") or 0.0),
-                onset=float(pk["onset"]) if pk.get("onset") is not None else float("nan"),
-                truncated=bool(pk.get("truncated")),
-            )
-            for pk in dq_result.get("peaks", [])
-        ]
-        try:
-            att = run_attribution(cycles, peaks, att_params)
-        except ValueError as exc:
-            raise EngineError(str(exc)) from exc
-        result = att.to_dict()
-        result["sourceDqdvHash"] = dq["params_hash"]
-        params_json = json.dumps(
-            {"method": att_params.method,
-             "baseline_cycles": att_params.baseline_cycles,
-             "checkup_group": att_params.checkup_group,
-             "dqdv_params_hash": dq["params_hash"]},
-            ensure_ascii=False, sort_keys=True,
-        )
-        self._ec_upsert_analysis(cell["id"], "attribution", params_json,
-                                 self._ec_hash(json.loads(params_json)), result)
-        return result
-
-    def _cmd_ec_attribution_get(self, p: dict) -> dict:
-        """归因结果 + 过期标记(所依据的 dQ/dV 参数已变更时 stale=true)。"""
-        cell = self._ec_cell_row(p.get("cell_id"))
-        row = self.db.query_one(
-            """SELECT * FROM ec_analyses
-               WHERE cell_id = ? AND kind = 'attribution' AND is_active = 1""",
-            (cell["id"],),
-        )
-        if row is None:
-            return {"computed": False}
-        dq = self.db.query_one(
-            """SELECT params_hash FROM ec_analyses
-               WHERE cell_id = ? AND kind = 'dqdv' AND is_active = 1""",
-            (cell["id"],),
-        )
-        try:
-            result = json.loads(row["result_json"])
-        except json.JSONDecodeError:
-            # 与 dqdv_result 的 corrupt 语义一致:损坏就说损坏,
-            # 不能 computed=true 带空体让前端拿去 .map 崩掉整棵树
-            return {"computed": False, "corrupt": True}
-        return {
-            "computed": True,
-            "stale": bool(dq is not None and dq["params_hash"] != result.get("sourceDqdvHash")),
-            "updatedAt": row["updated_at"],
-            **result,
-        }
-
-    def _cmd_ec_export(self, p: dict) -> dict:
-        """导出 CSV:圈统计 / 峰轨迹 / 归因分量。payload: {cell_id, kind, path?}"""
-        cell = self._ec_cell_row(p.get("cell_id"))
-        kind = p.get("kind", "cycles")
-        if kind == "cycles":
-            rows = self.db.query_all(
-                """SELECT cycle_index, q_charge, q_discharge, ce,
-                          i_med_charge, v_min, v_max, rate_group, incomplete
-                   FROM ec_cycles WHERE cell_id = ? ORDER BY cycle_index""",
-                (cell["id"],),
-            )
-            header = ["cycle", "q_charge_mAh", "q_discharge_mAh", "ce",
-                      "i_med_charge_mA", "v_min", "v_max", "rate_group", "incomplete"]
-            data = [
-                [r["cycle_index"], r["q_charge"], r["q_discharge"], r["ce"],
-                 r["i_med_charge"], r["v_min"], r["v_max"], r["rate_group"],
-                 int(bool(r["incomplete"]))]
-                for r in rows
-            ]
-            default_name = f"{Path(cell['name']).stem}_cycles.csv"
-        elif kind == "peaks":
-            analysis = self._ec_active_analysis(cell["id"], "dqdv")
-            result = json.loads(analysis["result_json"])
-            header = ["cycle", "direction", "window", "position_V", "height",
-                      "area", "fwhm_V", "onset_V", "truncated", "track_id"]
-            data = [
-                [pk["cycle"], pk["direction"], pk["window"], pk["position"],
-                 pk["height"], pk["area"], pk["fwhm"], pk.get("onset"),
-                 int(pk["truncated"]), pk.get("trackId")]
-                for pk in result.get("peaks", [])
-            ]
-            default_name = f"{Path(cell['name']).stem}_peaks.csv"
-        elif kind == "attribution":
-            analysis = self._ec_active_analysis(cell["id"], "attribution")
-            result = json.loads(analysis["result_json"])
-            header = ["cycle", "total_mAh_g", "polarization", "material", "cutoff"]
-            data = [
-                [c["cycle"], c["total"], c["polarization"], c["material"], c["cutoff"]]
-                for c in result.get("cycles", [])
-            ]
-            default_name = f"{Path(cell['name']).stem}_attribution.csv"
-        else:
-            raise EngineError(f"未知导出类型: {kind}")
-
-        target = self._export_target(
-            p.get("path"), default_name, bool(p.get("overwrite", False))
-        )
-        with target.open("w", encoding="utf-8-sig", newline="") as stream:
-            writer = csv.writer(stream)
-            writer.writerow(header)
-            writer.writerows(data)
-        return {"path": str(target), "rows": len(data)}
+    def _cmd_cex_backup_legacy(self, p: dict) -> dict:
+        target = self._export_target(p.get("path"), "cex_legacy_backup.zip", bool(p.get("overwrite")))
+        return self.cex.backup_legacy(p.get("sample_id"), target)
 
     def close(self) -> None:
-        self.db.close()
+        try:
+            self.cex.close()
+        finally:
+            self.db.close()
 
 
 def _fail(exc) -> dict:

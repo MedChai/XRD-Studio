@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import math
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 
@@ -49,7 +50,21 @@ class HighNiProfile:
     windows: tuple[PeakWindow, ...] = field(default_factory=tuple)
 
     def resolved_windows(self) -> tuple[PeakWindow, ...]:
-        return self.windows or default_windows()
+        if self.windows or self.wavelength == 1.5418:
+            return self.windows or default_windows()
+        def sine_at(angle: float) -> float:
+            return math.sin(math.radians(angle / 2)) * self.wavelength / 1.5418
+
+        windows = []
+        for window in default_windows():
+            lo = sine_at(window.center_2theta - window.half_width)
+            hi = sine_at(window.center_2theta + window.half_width)
+            if lo >= 1:
+                continue
+            left = 2 * math.degrees(math.asin(lo))
+            right = 2 * math.degrees(math.asin(min(1, hi)))
+            windows.append(replace(window, center_2theta=(left + right) / 2, half_width=(right - left) / 2))
+        return tuple(windows)
 
     def as_dict(self) -> dict[str, Any]:
         return {

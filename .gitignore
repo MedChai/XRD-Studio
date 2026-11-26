@@ -5,6 +5,7 @@ target/
 __pycache__/
 *.pyc
 .venv/
+.pytest_cache/
 .pytest-tmp-xrd/
 engine/build/
 app/src-tauri/sidecar/
@@ -18,6 +19,7 @@ XRDStudio/
 # 环境与 IDE
 .env
 .env.local
+.claude/settings.local.json
 .vscode/
 .idea/
 *.local

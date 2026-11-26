@@ -8,10 +8,10 @@
  *  (横向拖动平移 x、纵向拖动平移 y),双击复位到全范围(= Fit All)。
  */
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type RefObject } from "react";
 import * as echarts from "echarts";
 import { Download } from "lucide-react";
-import { exportEcFigure } from "../../services/exports";
+import { exportEcFigure, exportFigureSvg } from "../../services/exports";
 import { useUiStore } from "../../stores";
 import { t } from "../../i18n";
 
@@ -30,6 +30,7 @@ export interface EcSeries {
   dashed?: boolean;
   /** 空心点(不完整末圈等异常标记)。 */
   hollow?: boolean;
+  recordNumbers?: (number | null)[];
 }
 
 export function EcLineChart({
@@ -40,33 +41,104 @@ export function EcLineChart({
   height = 240,
   y2Percent,
   exportName,
+  formatX,
+  onRecord,
+  focusedPoint,
+  onX,
+  selectedRange,
+  figureMetadata,
+  xMinInterval,
 }: {
   series: EcSeries[];
   xName: string;
   y1Name: string;
   y2Name?: string;
-  height?: number;
+  height?: number | string;
   /** 第二轴是 0–1 比例(CE)时按百分比格式化。 */
   y2Percent?: boolean;
   /** 给了就在图右上角渲染 PNG 导出按钮,值为文件名片段(不含扩展名)。 */
   exportName?: string;
+  formatX?: (value: number) => string;
+  onRecord?: (number: number, seriesName: string) => void;
+  focusedPoint?: { x: number; y: [number | null, (number | null)?] } | null;
+  onX?: (x: number) => void;
+  selectedRange?: [number, number];
+  figureMetadata?: Record<string, unknown>;
+  xMinInterval?: number;
 }) {
   const ref = useRef<HTMLDivElement | null>(null);
   /** 当前 echarts 实例 —— 导出按钮要拿它 getDataURL(effect 局部变量拿不到)。 */
   const chartRef = useRef<echarts.ECharts | null>(null);
+  const interaction = useRef({ series, onRecord, onX });
+
+  useEffect(() => {
+    interaction.current = { series, onRecord, onX };
+  }, [series, onRecord, onX]);
 
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
     const chart = echarts.init(el, undefined, { renderer: "canvas" });
     chartRef.current = chart;
+
+    chart.getZr().on("dblclick", () => {
+      chart.dispatchAction({ type: "dataZoom", dataZoomIndex: 0, start: 0, end: 100 });
+      chart.dispatchAction({ type: "dataZoom", dataZoomIndex: 1, start: 0, end: 100 });
+    });
+    chart.getZr().on("click", (event) => {
+      const { series, onRecord, onX } = interaction.current;
+      const mouse: [number, number] = [event.offsetX, event.offsetY];
+      if (!chart.containPixel({ gridIndex: 0 }, mouse)) return;
+      if (onX) {
+        const [x] = chart.convertFromPixel({ xAxisIndex: 0, yAxisIndex: 0 }, mouse);
+        if (Number.isFinite(x)) onX(x);
+        return;
+      }
+      if (!onRecord) return;
+      let nearest: { record: number; name: string } | undefined;
+      let best = 24 ** 2;
+      for (const item of series) {
+        if (!item.recordNumbers) continue;
+        const axes = { xAxisIndex: 0, yAxisIndex: item.yAxisIndex ?? 0 };
+        const [x, y] = chart.convertFromPixel(axes, mouse);
+        const [xAtNextPixel, yAtNextPixel] = chart.convertFromPixel(axes, [mouse[0] + 1, mouse[1] + 1]);
+        const dx = Math.abs(xAtNextPixel - x);
+        const dy = Math.abs(yAtNextPixel - y);
+        if (!dx || !dy) continue;
+        for (const [index, [px, py]] of item.data.entries()) {
+          const record = item.recordNumbers?.[index];
+          if (py == null || record == null) continue;
+          const distance = ((px - x) / dx) ** 2 + ((py - y) / dy) ** 2;
+          if (distance < best) {
+            best = distance;
+            nearest = { record, name: item.name };
+          }
+        }
+      }
+      if (nearest) onRecord(nearest.record, nearest.name);
+    });
+    const ro = new ResizeObserver(() => chart.resize());
+    ro.observe(el);
+    return () => {
+      ro.disconnect();
+      chartRef.current = null;
+      chart.dispose();
+    };
+  }, []);
+
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart) return;
     chart.setOption(
       {
         animation: false,
         backgroundColor: "transparent",
-        grid: { top: 28, bottom: 40, left: 64, right: y2Name ? 64 : 24 },
+        grid: { top: series.length > 1 ? 48 : 28, bottom: 40, left: 64, right: y2Name ? 64 : 24 },
         legend: {
           show: series.length > 1,
+          type: "scroll" as const,
+          left: 36,
+          right: 20,
           top: 0,
           itemWidth: 14,
           itemHeight: 8,
@@ -77,6 +149,9 @@ export function EcLineChart({
           backgroundColor: cssVar("--bg-elevated"),
           borderColor: cssVar("--divider"),
           textStyle: { color: cssVar("--text-primary"), fontSize: 11 },
+          ...(formatX ? { axisPointer: {
+            label: { formatter: ({ value }: { value: unknown }) => formatX(Number(value)) },
+          } } : {}),
           valueFormatter: (v: unknown) =>
             typeof v === "number" ? (Math.abs(v) >= 100 ? v.toFixed(1) : v.toPrecision(4)) : "—",
         },
@@ -93,13 +168,17 @@ export function EcLineChart({
           // scale:true 不强制含 0:电压/圈数轴从数据范围起,
           // 否则横轴总是从 0 开始(与 y 轴行为一致)。
           scale: true,
+          minInterval: xMinInterval,
           name: xName,
           nameLocation: "middle",
           nameGap: 26,
           nameTextStyle: { color: cssVar("--text-tertiary"), fontSize: 10 },
           axisLine: { lineStyle: { color: cssVar("--plot-axis") } },
           axisTick: { show: false },
-          axisLabel: { color: cssVar("--text-secondary"), fontSize: 10 },
+          axisLabel: {
+            color: cssVar("--text-secondary"), fontSize: 10,
+            ...(formatX ? { formatter: formatX } : {}),
+          },
           splitLine: { show: false },
         },
         yAxis: [
@@ -138,15 +217,15 @@ export function EcLineChart({
               ]
             : []),
         ],
-        series: series.map((s) => ({
+        series: series.map((s, index) => ({
           name: s.name,
           type: "line" as const,
           yAxisIndex: s.yAxisIndex ?? 0,
           data: s.data,
           connectNulls: false,
-          symbol: s.hollow ? "emptyCircle" : "none",
-          showSymbol: s.hollow ? true : false,
-          symbolSize: s.hollow ? 7 : 0,
+          symbol: s.hollow ? "emptyCircle" : s.data.length === 1 ? "circle" : "none",
+          showSymbol: !!s.hollow || s.data.length === 1,
+          symbolSize: s.hollow || s.data.length === 1 ? 7 : 0,
           step: false,
           smooth: false,
           lineStyle: {
@@ -159,6 +238,10 @@ export function EcLineChart({
             borderColor: s.color ?? cssVar("--text-tertiary"),
             borderWidth: 1.5,
           },
+          ...(index === 0 && selectedRange ? { markArea: {
+            silent: true, itemStyle: { color: cssVar("--accent"), opacity: 0.12 },
+            data: [[{ xAxis: selectedRange[0] }, { xAxis: selectedRange[1] }]],
+          } } : {}),
           ...(s.kind === "area"
             ? {
                 stack: "total",
@@ -170,38 +253,25 @@ export function EcLineChart({
       },
       { notMerge: true },
     );
-    // 双击复位(= XRDChart 的 Fit All):两个 dataZoom 各自拉回 0–100%。
-    // 监听挂 zrender 上;dispose 时随 chart 一起回收,无需单独解绑。
-    chart.getZr().on("dblclick", () => {
-      chart.dispatchAction({ type: "dataZoom", dataZoomIndex: 0, start: 0, end: 100 });
-      chart.dispatchAction({ type: "dataZoom", dataZoomIndex: 1, start: 0, end: 100 });
-    });
-    const ro = new ResizeObserver(() => chart.resize());
-    ro.observe(el);
-    return () => {
-      ro.disconnect();
-      chartRef.current = null;
-      chart.dispose();
-    };
-  }, [series, xName, y1Name, y2Name, y2Percent]);
+  }, [series, xName, y1Name, y2Name, y2Percent, formatX, selectedRange, xMinInterval]);
 
-  async function handleExport() {
-    const chart = chartRef.current;
-    if (!chart || !exportName) return;
-    const dataUrl = chart.getDataURL({
-      type: "png",
-      pixelRatio: 2,
-      backgroundColor: cssVar("--bg-panel"),
+  useEffect(() => {
+    if (focusedPoint === undefined) return;
+    chartRef.current?.setOption({
+      series: series.map((s) => {
+        const y = focusedPoint?.y[s.yAxisIndex ?? 0];
+        return {
+          markPoint: {
+            symbol: "circle",
+            symbolSize: 10,
+            label: { show: false },
+            itemStyle: { color: s.color ?? cssVar("--accent"), borderColor: cssVar("--bg-panel"), borderWidth: 2 },
+            data: focusedPoint && y != null ? [{ coord: [focusedPoint.x, y] }] : [],
+          },
+        };
+      }),
     });
-    const r = await exportEcFigure(exportName, dataUrl);
-    if (r.cancelled) return;
-    useUiStore
-      .getState()
-      .showToast(
-        r.ok ? "success" : "error",
-        r.ok ? t.command.exportSuccess : (r.error ?? t.command.exportPending),
-      );
-  }
+  }, [series, focusedPoint, xName, y1Name, y2Name, y2Percent, formatX, selectedRange, xMinInterval]);
 
   return (
     // 外层只做定位(按钮要压在图上);echarts.init 独占内层 ref div,
@@ -209,14 +279,57 @@ export function EcLineChart({
     <div className="relative w-full" style={{ height }}>
       <div ref={ref} className="h-full w-full" />
       {exportName && (
-        <button
-          className="absolute right-1 top-1 z-10 rounded-[var(--radius-input)] border border-[var(--divider)] bg-[var(--bg-panel)]/85 p-1 text-[var(--text-secondary)] hover:bg-[var(--hover)]"
-          title={t.echem.exportFigure}
-          onClick={() => void handleExport()}
-        >
-          <Download size={13} />
-        </button>
+        <EcChartExport chartRef={chartRef} name={exportName} metadata={figureMetadata} belowLegend={series.length > 1} />
       )}
+    </div>
+  );
+}
+
+export function EcChartExport({ chartRef, name, metadata, belowLegend }: {
+  chartRef: RefObject<echarts.ECharts | null>;
+  name: string;
+  metadata?: Record<string, unknown>;
+  belowLegend?: boolean;
+}) {
+  async function save(format: "png" | "svg") {
+    const chart = chartRef.current;
+    if (!chart) return;
+    const notify = useUiStore.getState().showToast;
+    try {
+      const backgroundColor = cssVar("--bg-panel");
+      let result;
+      if (format === "svg") {
+        const svgChart = echarts.init(null, undefined, {
+          renderer: "svg", ssr: true, width: chart.getWidth(), height: chart.getHeight(),
+        });
+        try {
+          svgChart.setOption({ ...chart.getOption(), backgroundColor });
+          const context = JSON.stringify(metadata ?? {}).replace(/[&<>]/g, (char) => (
+            { "&": "&amp;", "<": "&lt;", ">": "&gt;" }[char] ?? char
+          ));
+          const svg = svgChart.renderToSVGString().replace(/<svg[^>]*>/, (tag) => `${tag}\n<metadata>${context}</metadata>`);
+          result = await exportFigureSvg(name, svg);
+        } finally {
+          svgChart.dispose();
+        }
+      } else {
+        result = await exportEcFigure(name, chart.getDataURL({ type: "png", pixelRatio: 2, backgroundColor }), metadata);
+      }
+      if (!result.cancelled) {
+        notify(result.ok ? "success" : "error", result.ok ? t.command.exportSuccess : (result.error ?? "导出失败"));
+      }
+    } catch (error) {
+      notify("error", error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  const className = "rounded-[var(--radius-input)] border border-[var(--divider)] bg-[var(--bg-panel)]/90 px-1.5 py-1 text-[11px] text-[var(--text-secondary)] hover:bg-[var(--hover)]";
+  return (
+    <div className={`absolute right-1 z-10 flex gap-1 ${belowLegend ? "top-6" : "top-1"}`}>
+      <button type="button" className={className} title="导出 PNG" onClick={() => void save("png")}>
+        {metadata ? "PNG" : <Download size={13} />}
+      </button>
+      {metadata && <button type="button" className={className} title="导出 SVG" onClick={() => void save("svg")}>SVG</button>}
     </div>
   );
 }

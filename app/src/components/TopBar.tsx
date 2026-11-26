@@ -1,17 +1,17 @@
-/** 顶栏(§16):52px,只有 + Import 是 Primary Button,其余 icon 化。
- *  选中电化学 cell 时「+」改开电化学导入(LAND xlsx)——不然 XRD
- *  导入面板在电化学语境里必然选错文件类型。 */
+/** 顶栏根据当前工作区打开谱图导入或蓝电 CEX 文件选择。 */
 
-import { Plus, Search, Settings, TrendingUp } from "lucide-react";
+import { FolderOpen, Plus, Search, Settings, TrendingUp } from "lucide-react";
 import { Button, IconButton } from "../components/controls";
 import { ProjectSwitcher } from "./ProjectSwitcher";
 import { useSelectionStore, useUiStore } from "../stores";
 import { t } from "../i18n";
+import { chooseCexFiles, useCexSession } from "../features/echem/cex/session";
 
 export function TopBar() {
-  const { setImportOpen, setEcImportOpen, setPaletteOpen, setSettingsOpen, setTrendOpen } =
+  const { setImportOpen, setPaletteOpen, setSettingsOpen, setTrendOpen } =
     useUiStore();
-  const cellId = useSelectionStore((s) => s.cellId);
+  const cexActive = useSelectionStore((s) => s.cexActive);
+  const activeCex = useCexSession((s) => s.active);
 
   return (
     <header
@@ -23,6 +23,13 @@ export function TopBar() {
       </span>
       <ProjectSwitcher />
       <div className="flex-1" />
+      <Button kind="ghost" title={!cexActive && activeCex ? "返回蓝电工作区" : "打开蓝电 CEX（Ctrl+O）"}
+        onClick={() => {
+          if (!cexActive && activeCex) useCexSession.getState().select(activeCex);
+          else void chooseCexFiles();
+        }}>
+        <FolderOpen size={14} /> {!cexActive && activeCex ? "蓝电数据" : "打开 CEX"}
+      </Button>
       <IconButton title={t.topbar.trend} onClick={() => setTrendOpen(true)}>
         <TrendingUp size={16} />
       </IconButton>
@@ -34,7 +41,10 @@ export function TopBar() {
       </IconButton>
       <Button
         kind="primary"
-        onClick={() => (cellId != null ? setEcImportOpen(true) : setImportOpen(true))}
+        onClick={() => {
+          if (cexActive) void chooseCexFiles(useSelectionStore.getState().sampleId ?? undefined);
+          else setImportOpen(true);
+        }}
       >
         <Plus size={14} /> {t.topbar.import}
       </Button>

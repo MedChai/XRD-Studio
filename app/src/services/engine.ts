@@ -25,20 +25,6 @@ import type {
   TrashItem,
   TrashKind,
   TrashListResult,
-  EcAttributionResult,
-  EcAttributionState,
-  EcCellOverview,
-  EcCellSummary,
-  EcCurvePayload,
-  EcDqdvComputeResult,
-  EcDqdvParams,
-  EcDqdvResult,
-  EcDqdvState,
-  EcExportResult,
-  EcImportResult,
-  EcPreviewResult,
-  EcTrackRow,
-  EcWaterfallPayload,
 } from "../types/engine";
 
 /**
@@ -324,7 +310,15 @@ const mockAnnotations = new Map<number, AnnotationContext>();
  *  commit→重开仍报 peaksStored:true,验证到真机不存在的假行为。 */
 const mockStoredPeaks = new Set<number>();
 /** mock 当前分析的 pipeline(preview/commit 时更新,annotate 时取指纹)。 */
-let mockPipeline: Record<string, unknown> = {};
+const mockPipelines = new Map<number, Record<string, unknown>>();
+
+function saveMockPipeline(id: number, pipeline: Record<string, unknown>) {
+  if (hashPipeline(pipeline) !== hashPipeline(mockPipelines.get(id) ?? {})) {
+    mockStoredPeaks.delete(id);
+    mockDomainCache.delete(id);
+  }
+  mockPipelines.set(id, pipeline);
+}
 /** 预设列表(按项目过滤),与 analysis_presets 表同构。 */
 const mockPresets: {
   id: number;
@@ -370,120 +364,6 @@ const mockTrash: TrashItem[] = [];
 const mockDomainCache = new Map<number, HighNiResult>();
 const mockRenamed = new Map<string, string>();
 
-// ---------- 电化学 mock 状态(与 ec_* 表同语义) ----------
-/** mock 电池:挂在 sample 1 下,id 固定 1。形状与引擎严格一致。 */
-const MOCK_EC_CELL: EcCellSummary = {
-  id: 1,
-  name: "LAND-0.2C循环示例",
-  filename: "1 0.2 循环170214_005_7.xlsx",
-  massMg: 1.77,
-  format: "xlsx",
-  cycleCount: 0, // 由 mockEcCycles() 推导
-  lastCycle: null,
-  importedAt: "2026-10-06 10:00:00",
-};
-/** 当前(或上次)dqdv 计算的参数指纹;null = 从未计算。 */
-let mockEcDqdvHash: string | null = null;
-/** 上次计算的入参快照(ec.dqdv_result 读回用,与引擎 params_json 同语义)。 */
-let mockEcDqdvParams: EcDqdvParams = {};
-/** 上次归因所依据的 dqdv 指纹(引擎存 sourceDqdvHash,stale 由此判定)。 */
-let mockEcAttributionSource: string | null = null;
-
-/** mock 圈序列:确定性生成,不随机 —— mock 的价值在于形状稳定可断言。 */
-function mockEcCycles() {
-  const cycles: {
-    cycle: number; qCharge: number; qDischarge: number; ce: number;
-    iMedCharge: number; vMin: number; vMax: number;
-    rateGroup: "main" | "slow" | "fast"; incomplete: boolean;
-  }[] = [];
-  const n = 120;
-  for (let i = 1; i <= n; i++) {
-    const fade = 1 - 0.35 * (i / n) ** 1.2;            // 140 → 91 mAh/g
-    const qd = Math.round(140 * fade * 1000) / 1000;
-    const qc = Math.round(qd / 0.985 * 1000) / 1000;
-    cycles.push({
-      cycle: i,
-      qCharge: qc,
-      qDischarge: qd,
-      ce: 0.985,
-      iMedCharge: i <= 3 ? 0.032 : 0.068,
-      vMin: 2.7,
-      vMax: 4.3,
-      rateGroup: i <= 3 ? "slow" : "main",
-      incomplete: false,
-    });
-  }
-  return cycles;
-}
-
-/** mock 单圈 dQ/dV 曲线(充电方向模板,放电镜像 + 峰位下移)。
- *  形状与引擎 ec.dqdv_curve 严格一致:Float32Array + 二进制信封已由
- *  engineCommand 之上的路径处理,mock 只需构造同样的载荷对象。 */
-function mockEcCurve(cycle: number, direction: "charge" | "discharge") {
-  const dv = 0.002;
-  const v: number[] = [];
-  const y: number[] = [];
-  const fade = 1 - 0.3 * (cycle / 120);
-  const shift = direction === "discharge" ? 0.0003 * cycle : 0;
-  for (let x = 2.9; x <= 4.32 + 1e-9; x += dv) {
-    const g = (c: number, h: number, s: number) =>
-      h * Math.exp(-0.5 * ((x - (c - shift)) / s) ** 2);
-    v.push(Math.round(x * 1000) / 1000);
-    y.push(
-      g(3.67, 320 * fade, 0.055) + g(4.18, 160 * fade, 0.045) + 8,
-    );
-  }
-  return {
-    cycle,
-    direction,
-    pointCount: v.length,
-    paramsHash: mockEcDqdvHash ?? "mock",
-    v: Float32Array.from(v),
-    dqdv: Float32Array.from(y),
-  } satisfies EcCurvePayload;
-}
-
-/** mock 峰/轨迹:每圈每方向 H1H2 一个非截断峰;充电 H2H3 末端圈截断。 */
-function mockEcPeaksAndTracks() {
-  const cycles = mockEcCycles();
-  const peaks: {
-    cycle: number; direction: "charge" | "discharge"; window: string;
-    position: number; height: number; area: number; fwhm: number;
-    prominence: number; onset: number | null; truncated: boolean;
-    trackId: number | null;
-  }[] = [];
-  for (const c of cycles) {
-    const fade = 1 - 0.3 * (c.cycle / 120);
-    const h = 320 * fade;
-    peaks.push({
-      cycle: c.cycle, direction: "charge", window: "H1H2",
-      position: 3.67, height: h, area: h * 0.055 * 2.5 * 0.64,
-      fwhm: 0.13, prominence: h, onset: 3.55, truncated: false, trackId: 1,
-    });
-    peaks.push({
-      cycle: c.cycle, direction: "discharge", window: "H1H2",
-      position: 3.67 - 0.0003 * c.cycle, height: h, area: h * 0.055 * 2.5 * 0.64,
-      fwhm: 0.13, prominence: h, onset: 3.55 - 0.0003 * c.cycle,
-      truncated: false, trackId: 2,
-    });
-    if (c.cycle > 60) {
-      // 充电 H2→H3 贴截止线被截断(方法学演示:截断峰不算面积)
-      peaks.push({
-        cycle: c.cycle, direction: "charge", window: "H2H3",
-        position: 4.28 + 0.0002 * (c.cycle - 60), height: 90 * fade,
-        area: 0, fwhm: 0.0, prominence: 90 * fade, onset: 4.1,
-        truncated: true, trackId: null,
-      });
-    }
-  }
-  const tracks: EcTrackRow[] = [
-    { trackId: 1, direction: "charge", window: "H1H2", label: "H1→H2",
-      firstCycle: 1, lastCycle: 120, nPeaks: 120, continuity: 1 },
-    { trackId: 2, direction: "discharge", window: "H1H2", label: "H1→H2",
-      firstCycle: 1, lastCycle: 120, nPeaks: 120, continuity: 1 },
-  ];
-  return { peaks, tracks };
-}
 const mockProfiles: MaterialProfile[] = [
   {
     id: 1,
@@ -527,8 +407,7 @@ async function mockCommand(
         smoothing?: { enabled?: boolean };
         background?: { enabled?: boolean };
       };
-      mockPipeline = pipeline as Record<string, unknown>;
-      const doAnnotate = payload.annotate !== false;
+      const doAnnotate = payload.annotate === true;
       const restore = payload.restoreAnnotation === true;
       const dsId = Number(payload.dataset_id ?? 1);
       let peaks = fakePeaks(
@@ -581,20 +460,24 @@ async function mockCommand(
       if (stored) peaks = mergeMockLabels(peaks, stored);
       return ok({
         analysisId: 1,
-        pipeline: {},
+        pipeline: mockPipelines.get(dsId) ?? {},
         curve: mockCurveCache,
         peaks,
         peaksStored: mockStoredPeaks.has(dsId),
         smoothingAffectsMetrics: false,
         warnings: [],
         annotation: stored ?? null,
-        pipelineHash: hashPipeline({}),
+        pipelineHash: hashPipeline(mockPipelines.get(dsId) ?? {}),
       });
     }
     case "peaks.detect": {
       if (!mockCurveCache) mockCurveCache = fakeLfpCurve();
       const dsId = Number(payload.dataset_id ?? 1);
       const peaks = fakePeaks(mockCurveCache, "medium");
+      if (!mockAnnotations.has(dsId) && payload.annotate !== true) {
+        mockStoredPeaks.add(dsId);
+        return ok({ peaks, annotation: null });
+      }
       for (const p of peaks) {
         const a = annotateMock(p.position);
         p.hkl = a.hkl;
@@ -611,7 +494,7 @@ async function mockCommand(
       }));
       mockAnnotations.set(dsId, {
         ...MOCK_ANNOTATION,
-        pipelineHash: hashPipeline(mockPipeline),
+        pipelineHash: hashPipeline(mockPipelines.get(dsId) ?? {}),
         annotatedAt: new Date().toISOString(),
         labels,
       });
@@ -643,7 +526,7 @@ async function mockCommand(
       // 与引擎一致:annotate = 权威刷新,覆盖 annotation_json 快照。
       const saved: AnnotationContext = {
         ...MOCK_ANNOTATION,
-        pipelineHash: hashPipeline(mockPipeline),
+        pipelineHash: hashPipeline(mockPipelines.get(dsId) ?? {}),
         annotatedAt: new Date().toISOString(),
         labels: annotated.map((a) => ({
           position: a.position,
@@ -654,7 +537,9 @@ async function mockCommand(
         })),
       };
       mockAnnotations.set(dsId, saved);
+      mockStoredPeaks.add(dsId);
       return ok({
+        peaks: mergeMockLabels(peaks, saved),
         annotated,
         count: annotated.filter((a) => a.hkl_label).length,
         updated: annotated.length,
@@ -664,10 +549,7 @@ async function mockCommand(
     case "analysis.commit": {
       const next = (payload.pipeline ?? {}) as Record<string, unknown>;
       // 与引擎一致:参数变化的 commit 删 peaks 行(annotation 保留)
-      if (hashPipeline(next) !== hashPipeline(mockPipeline)) {
-        mockStoredPeaks.delete(Number(payload.dataset_id ?? 1));
-      }
-      mockPipeline = next;
+      saveMockPipeline(Number(payload.dataset_id ?? 1), next);
       return ok({ analysisId: 1 });
     }
     case "profiles.list":
@@ -871,8 +753,8 @@ async function mockCommand(
         (x) => x.id === Number(payload.preset_id),
       );
       if (!preset) return fail("Preset 不存在");
-      mockPipeline = { ...preset.pipeline };
-      const ids = (payload.dataset_ids as unknown[]) ?? [];
+      const ids = (payload.dataset_ids as number[]) ?? [];
+      for (const id of ids) saveMockPipeline(id, preset.pipeline);
       return ok({ applied: ids.length });
     }
     case "meta.rename": {
@@ -887,16 +769,18 @@ async function mockCommand(
         return fail("只有数据集和电池有文件位置");
       }
       // 浏览器 dev 没有真实库,给个可复制的演示路径,走通 UI 流程即可
+      const kind = payload.kind === "stored" ? "stored" : "source";
+      const name = table === "datasets" ? "scan-01.xy" : "cell.xlsx";
       return ok({
-        path: table === "datasets" ? "D:\\demo\\scan-01.xy" : "D:\\demo\\cell.xlsx",
-        kind: "source",
+        path: kind === "stored" ? `D:\\XRD Studio\\XRDStudio\\library\\${table === "datasets" ? "projects\\1-示例项目" : "data"}\\demo\\${name}` : `D:\\demo\\${name}`,
+        kind,
       } satisfies MetaFilePathResult);
     }
     case "meta.paths":
       // 浏览器 dev 没有真实数据目录,给演示路径走通 UI 流程
       return ok({
-        dataRoot: "C:\\Users\\demo\\AppData\\Local\\XRDStudio",
-        logFile: "C:\\Users\\demo\\AppData\\Local\\XRDStudio\\logs\\engine.log",
+        dataRoot: "D:\\XRD Studio\\XRDStudio\\library",
+        logFile: "D:\\XRD Studio\\XRDStudio\\logs\\engine.log",
         logExists: true,
       });
     case "meta.soft_delete": {
@@ -913,7 +797,7 @@ async function mockCommand(
         mockTrash.unshift({
           kind: "ec_cells",
           id,
-          name: mockRenamed.get(`ec_cells:${id}`) ?? MOCK_EC_CELL.name,
+          name: mockRenamed.get(`ec_cells:${id}`) ?? "蓝电 CEX",
           deletedAt: new Date().toISOString().slice(0, 19).replace("T", " "),
           projectName: "LFP Study",
           sampleName: mockRenamed.get("samples:1") ?? SAMPLES[0],
@@ -1015,231 +899,8 @@ async function mockCommand(
         } satisfies PeakResult,
       });
     }
-    // ---------- 电化学(mock 与引擎形状严格一致) ----------
-    case "ec.preview": {
-      const path = String(payload.path ?? "land.xlsx");
-      const cycles = mockEcCycles();
-      return ok({
-        file: path.split(/[\\/]/).pop() ?? path,
-        session: {
-          test_name: "fixture-0.2C循环",
-          channel: "005_7",
-          start_time: "2026/09/01 08:00:00",
-          end_time: "2026/09/30 17:08:43",
-          program: [
-            "工步1: 静置 | 直到: 单步时间≥48:01:00",
-            "工步2: 倍率充电: 0.1*C | 直到: 电压*≥4.3V",
-            "工步3: 倍率放电: 0.1*C | 直到: 电压*≤2.7V",
-            "工步4: 倍率充电: 0.2*C | 直到: 电压*≥4.3V",
-            "测试结束",
-          ],
-        },
-        qa: { n_records: 386061, backwards: 0, interval_med: 10 },
-        n_cycles: cycles.length,
-        cycles_preview: cycles.slice(0, 8).map((c) => ({
-          index: c.cycle, q_charge: c.qCharge, q_discharge: c.qDischarge,
-          ce: c.ce, rate_group: c.rateGroup, incomplete: c.incomplete,
-        })),
-        mass_mg_estimate: 1.77,
-      } satisfies EcPreviewResult);
-    }
-    case "ec.import": {
-      const first = Array.isArray(payload.paths) ? String(payload.paths[0]) : "land.xlsx";
-      return ok({
-        imported: [{ id: 1, name: first.split(/[\\/]/).pop() ?? first, n_cycles: 120 }],
-        duplicates: [],
-        failures: [],
-        sampleId: Number(payload.sample_id ?? 1),
-      } satisfies EcImportResult);
-    }
-    case "ec.cells": {
-      const sid = Number(payload.sample_id ?? 1);
-      // mock 只有一颗电池且挂在 sample 1 下(与 mock library.tree 对齐)
-      if (sid !== 1 || isTrashed("ec_cells", MOCK_EC_CELL.id)) {
-        return ok({ cells: [] } satisfies { cells: EcCellSummary[] });
-      }
-      return ok({
-        cells: [{ ...MOCK_EC_CELL, cycleCount: 120, lastCycle: 120 }],
-      } satisfies { cells: EcCellSummary[] });
-    }
-    case "ec.cell_overview": {
-      const id = Number(payload.cell_id ?? 1);
-      if (id !== MOCK_EC_CELL.id || isTrashed("ec_cells", id)) {
-        return fail("电化学数据(电池)不存在或已在回收站中");
-      }
-      return ok({
-        id,
-        name: mockRenamed.get(`ec_cells:${id}`) ?? MOCK_EC_CELL.name,
-        filename: MOCK_EC_CELL.filename,
-        massMg: MOCK_EC_CELL.massMg,
-        session: {
-          test_name: "陈钰婷-0.2C循环",
-          channel: "005_7",
-          start_time: "2017/02/14 13:43:37",
-          end_time: "2026/09/19 17:08:43",
-          program: [
-            "工步1: 静置 | 直到: 单步时间≥48:01:00",
-            "工步3: 倍率充电: 0.1*C | 直到: 电压*≥4.3V",
-            "工步5: 倍率放电: 0.1*C | 直到: 电压*≤2.7V",
-            "工步8: 倍率充电: 0.2*C | 直到: 电压*≥4.3V",
-            "测试结束",
-          ],
-        },
-        qa: { n_records: 386061, backwards: 0, dup_time: 759, interval_med: 10 },
-        cycles: mockEcCycles(),
-      } satisfies EcCellOverview);
-    }
-    case "ec.dqdv_compute": {
-      const id = Number(payload.cell_id ?? 1);
-      if (id !== MOCK_EC_CELL.id) return fail("电化学数据(电池)不存在或已在回收站中");
-      const params = (payload.params ?? {}) as EcDqdvParams;
-      mockEcDqdvHash = hashPipeline(params);
-      mockEcDqdvParams = params;
-      const { peaks, tracks } = mockEcPeaksAndTracks();
-      return ok({
-        curveFile: `dqdv_${mockEcDqdvHash}.npz`,
-        nCurves: 240,
-        nPeaks: peaks.length,
-        nTruncated: peaks.filter((p) => p.truncated).length,
-        peaks,
-        tracks,
-        paramsHash: mockEcDqdvHash,
-      } satisfies EcDqdvComputeResult);
-    }
-    case "ec.dqdv_result": {
-      // 与引擎同语义:没算过 → {computed:false};算过 → 原样读回明细+参数。
-      if (mockEcDqdvHash == null) return ok({ computed: false } satisfies EcDqdvResult);
-      const id = Number(payload.cell_id ?? 1);
-      if (id !== MOCK_EC_CELL.id) return fail("电化学数据(电池)不存在或已在回收站中");
-      const { peaks, tracks } = mockEcPeaksAndTracks();
-      return ok({
-        computed: true,
-        paramsHash: mockEcDqdvHash,
-        params: { dv_mv: 2.0, sg_window: 11, sg_poly: 3, v_min: 2.9, v_max: 4.32, ...mockEcDqdvParams },
-        updatedAt: new Date().toISOString().slice(0, 19).replace("T", " "),
-        nCurves: 240,
-        nPeaks: peaks.length,
-        nTruncated: peaks.filter((p) => p.truncated).length,
-        peaks,
-        tracks,
-      } satisfies EcDqdvResult);
-    }
-    case "ec.dqdv_state": {
-      if (mockEcDqdvHash == null) return ok({ computed: false } satisfies EcDqdvState);
-      return ok({
-        computed: true,
-        paramsHash: mockEcDqdvHash,
-        updatedAt: new Date().toISOString().slice(0, 19).replace("T", " "),
-      } satisfies EcDqdvState);
-    }
-    case "ec.dqdv_curve": {
-      if (mockEcDqdvHash == null) return fail("尚未计算dQ/dV,请先执行计算");
-      const cycle = Number(payload.cycle ?? 1);
-      const direction = (payload.direction === "discharge"
-        ? "discharge"
-        : "charge") as "charge" | "discharge";
-      return ok(mockEcCurve(cycle, direction));
-    }
-    case "ec.dqdv_waterfall": {
-      if (mockEcDqdvHash == null) return fail("尚未计算dQ/dV,请先执行计算");
-      const direction = (payload.direction === "discharge"
-        ? "discharge"
-        : "charge") as "charge" | "discharge";
-      const step = Math.max(1, Number(payload.step ?? 10));
-      const cycles = mockEcCycles();
-      const sampled = cycles.filter((_, i) => i % step === 0).map((c) => c.cycle);
-      // 与引擎同一电压网格(0.004 步长 → 356 点)
-      const v: number[] = [];
-      for (let x = 2.9; x <= 4.32 + 1e-9; x += 0.004) v.push(Math.round(x * 1000) / 1000);
-      const matrix = new Float32Array(sampled.length * v.length);
-      sampled.forEach((cy, r) => {
-        // 复用单圈曲线重采样到公共网格(与引擎行为一致)
-        const curve = mockEcCurve(cy, direction);
-        for (let i = 0; i < v.length; i++) {
-          const idx = Math.round((v[i] - curve.v[0]) / 0.002);
-          matrix[r * v.length + i] = curve.dqdv[idx] ?? Number.NaN;
-        }
-      });
-      return ok({
-        cycles: sampled,
-        direction,
-        step,
-        shape: [sampled.length, v.length],
-        v,
-        matrix,
-        paramsHash: mockEcDqdvHash,
-      } satisfies EcWaterfallPayload);
-    }
-    case "ec.attribution_run": {
-      if (mockEcDqdvHash == null) return fail("尚未计算dQ/dV,请先执行计算");
-      const cycles = mockEcCycles();
-      const baseline = cycles[3].qDischarge; // 主倍率基线
-      const attCycles = cycles.slice(3).map((c) => {
-        const total = Math.round((baseline - c.qDischarge) * 1000) / 1000;
-        return {
-          cycle: c.cycle,
-          total,
-          polarization: Math.round(total * 0.62 * 1000) / 1000,
-          material: Math.round(total * 0.13 * 1000) / 1000,
-          cutoff: Math.round(total * 0.25 * 1000) / 1000,
-        };
-      });
-      mockEcAttributionSource = mockEcDqdvHash;
-      return ok({
-        method: "B",
-        confidence: "low",
-        baseline: Math.round(baseline * 1000) / 1000,
-        nCycles: attCycles.length,
-        lastCycle: attCycles[attCycles.length - 1].cycle,
-        lastTotal: attCycles[attCycles.length - 1].total,
-        cycles: attCycles,
-        ceSeries: cycles.map((c) => [c.cycle, c.ce] as [number, number]),
-        cumulativeIrreversible: cycles.map((c) => [
-          c.cycle,
-          Math.round(c.qCharge * (1 - c.ce) * c.cycle * 100) / 100,
-        ] as [number, number]),
-        truncatedEvidence: {
-          available: true,
-          nTruncatedCycles: 60,
-          nFullCycles: 0,
-          firstPosition: 4.28,
-          lastPosition: 4.3,
-          driftV: 0.02,
-        },
-        notes: ["mock:未检出低倍率回访圈,极化与活性拆分为近似值(方法 B)。"],
-        conclusion:
-          "第 120 圈累计衰减 40.9 mAh/g(基线 137.8),主导分量为极化型占 62%。分量:极化 25.4 / 活性 5.3 / 截断 10.2 mAh/g。注:方法 B 为近似拆分,分量比例仅供参考;方向判断可靠。",
-        sourceDqdvHash: mockEcDqdvHash,
-      } satisfies EcAttributionResult);
-    }
-    case "ec.attribution_get": {
-      if (mockEcAttributionSource == null) {
-        return ok({ computed: false } satisfies EcAttributionState);
-      }
-      // get 是只读:内容用确定性生成复用,但 sourceDqdvHash/stale 必须反映
-      // **上次归因时的**指纹 —— run 的递归调用会覆盖它,先存后还原。
-      const source = mockEcAttributionSource;
-      const run = (await mockCommand("ec.attribution_run", {
-        cell_id: 1,
-      })) as EngineResponse<EcAttributionResult>;
-      if (!run.ok) return run;
-      mockEcAttributionSource = source;
-      return ok({
-        ...run.data,
-        sourceDqdvHash: source,
-        computed: true,
-        stale: mockEcDqdvHash !== source,
-        updatedAt: new Date().toISOString().slice(0, 19).replace("T", " "),
-      } satisfies EcAttributionState);
-    }
-    case "ec.export": {
-      const kind = String(payload.kind ?? "cycles");
-      const rows = kind === "cycles" ? 120 : kind === "peaks" ? 360 : 117;
-      return ok({
-        path: `C:/Users/dev/Exports/ec_${kind}.csv`,
-        rows,
-      } satisfies EcExportResult);
-    }
+    case "cex.cells":
+      return ok({ cells: [], historyCount: 0 });
     default:
       return fail(`mock: 未实现命令 ${cmd}`);
   }
@@ -1250,97 +911,6 @@ function ok<T>(data: T): EngineResponse<T> {
 }
 function fail(error: string): EngineResponse<never> {
   return { ok: false, error, detail: "" };
-}
-
-// ============================================================
-// 电化学(LAND dQ/dV 归因)命令封装。
-// 薄封装只为类型收窄 —— engineCommand 本身是泛型,这里把每条 ec 命令
-// 的返回类型钉死,调用方(store/组件)不再手写泛型参数。
-// ============================================================
-
-/** dry-run 解析:不落库。大文件(20MB xlsx)约 20 秒,调用方须给等待态。 */
-export function ecPreview(path: string) {
-  return engineCommand<EcPreviewResult>("ec.preview", { path });
-}
-
-export function ecImport(payload: {
-  paths: string[];
-  project_id: number;
-  sample_id?: number;
-  new_sample?: { name: string; material?: string };
-  active_mass_mg?: number;
-  import_anyway?: boolean;
-}) {
-  return engineCommand<EcImportResult>("ec.import", payload);
-}
-
-export function ecCells(sampleId: number) {
-  return engineCommand<{ cells: EcCellSummary[] }>("ec.cells", {
-    sample_id: sampleId,
-  });
-}
-
-export function ecCellOverview(cellId: number) {
-  return engineCommand<EcCellOverview>("ec.cell_overview", { cell_id: cellId });
-}
-
-export function ecDqdvCompute(cellId: number, params: EcDqdvParams) {
-  return engineCommand<EcDqdvComputeResult>("ec.dqdv_compute", {
-    cell_id: cellId,
-    params,
-  });
-}
-
-export function ecDqdvState(cellId: number) {
-  return engineCommand<EcDqdvState>("ec.dqdv_state", { cell_id: cellId });
-}
-
-/** 读回上次固化的峰/轨迹/参数(打开 cell 时调用,重启后免重算)。 */
-export function ecDqdvResult(cellId: number) {
-  return engineCommand<EcDqdvResult>("ec.dqdv_result", { cell_id: cellId });
-}
-
-export function ecDqdvCurve(
-  cellId: number,
-  cycle: number,
-  direction: "charge" | "discharge",
-) {
-  return engineCommand<EcCurvePayload>("ec.dqdv_curve", {
-    cell_id: cellId,
-    cycle,
-    direction,
-  });
-}
-
-export function ecDqdvWaterfall(
-  cellId: number,
-  direction: "charge" | "discharge",
-  step: number,
-) {
-  return engineCommand<EcWaterfallPayload>("ec.dqdv_waterfall", {
-    cell_id: cellId,
-    direction,
-    step,
-  });
-}
-
-export function ecAttributionRun(cellId: number) {
-  return engineCommand<EcAttributionResult>("ec.attribution_run", {
-    cell_id: cellId,
-  });
-}
-
-export function ecAttributionGet(cellId: number) {
-  return engineCommand<EcAttributionState>("ec.attribution_get", {
-    cell_id: cellId,
-  });
-}
-
-export function ecExport(
-  cellId: number,
-  kind: "cycles" | "peaks" | "attribution",
-) {
-  return engineCommand<EcExportResult>("ec.export", { cell_id: cellId, kind });
 }
 
 // ============================================================
@@ -1383,6 +953,7 @@ export async function revealPath(
 export async function revealInExplorer(
   table: TrashKind,
   id: number,
+  kind: "stored" | "source",
 ): Promise<
   | { ok: true; path: string; mode: "reveal" | "degraded" }
   | { ok: false; error: string }
@@ -1390,6 +961,7 @@ export async function revealInExplorer(
   const r = await engineCommand<MetaFilePathResult>("meta.file_path", {
     table,
     id,
+    kind,
   });
   if (!r.ok) return { ok: false, error: r.error };
   return revealPath(r.data.path);

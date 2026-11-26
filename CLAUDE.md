@@ -104,7 +104,7 @@ mock 也必须与引擎**行为**一致,而不只是接口:晶面标注的 mock 
 
 `peaks/annotate.py` 的通用路径 `annotate_peaks()` **要求显式传 `reference_table`**;不传会抛错,不再静默回退到高镍表。
 
-**性能红线:标注必须走缓存。** 正式标注(`peaks.detect` / `peaks.annotate` / `domain.high_ni.analyze`)都会调用 `annotate_high_ni` / `refine_cell`;交互 `analysis.preview` 传 `annotate=false` **不**调用它,标签由 `analyses.annotation_json` 的 labels 快照按位置恢复(`restoreAnnotation`)。全谱精修单次 1.5–4.5 秒,不缓存就是"切几次图就卡死"。所以:
+**性能红线:标注必须走缓存。** 正式标注(`peaks.detect` 仅针对已显式选用层状模型的谱，或传入 `annotate=true` / `peaks.annotate` / `domain.high_ni.analyze`)都会调用 `annotate_high_ni` / `refine_cell`;交互 `analysis.preview` 传 `annotate=false` **不**调用它,标签由 `analyses.annotation_json` 的 labels 快照按位置恢复(`restoreAnnotation`)。全谱精修单次 1.5–4.5 秒,不缓存就是"切几次图就卡死"。所以:
 
 - 调用时**必须传 `dataset_id`**,否则不缓存(`annotate._FIT_CACHE`)。
 - 缓存键带数据指纹(点数、x 首尾、y 和、波长),不是仅 id —— 数据集删除后 id 可能复用,只按 id 缓存会拿到上一条曲线的晶胞,标签静默错位。
@@ -168,7 +168,7 @@ grep -n '[^ -~]' _launcher.ps1    # 应当没有任何输出
 
 ### 10. 引擎与 Tauri 的路径/注入约定
 
-- Data Store 根目录:`%LOCALAPPDATA%\XRDStudio`(规避 Program Files 权限与中文用户目录),含 `database/ data/ cache/ exports/ logs/`。
+- Data Store 位于软件目录的 `XRDStudio/library`。XRD 副本位于 `projects/<编号-名称>/<导入编号>/<原文件名>`，日志位于同级的 `XRDStudio/logs`。首次使用时从旧版用户库复制。
 - 生产环境走 stdio 长度前缀帧 `[u32 BE 长度][UTF-8 JSON]`,Rust 侧负责进程监管、请求 id 路由、stderr 落 `logs/engine.log`;HTTP 只在开发期可选,**发布版不包含**。
 - Rust `ensure_running()` 的启动**全程持互斥锁** —— 并发请求(如首屏 `Promise.all`)若穿过"检查未运行 → spawn"的间隙会重复拉起 sidecar(实测曾出现 4 个实例)。
 - `XRD_ENGINE` 环境变量可强制指定引擎可执行文件;dev 构建自动定位 `engine/.venv`。
@@ -365,12 +365,12 @@ Inspector 参数预设区、峰表双击左界/右界。
 
 ### 环境事实(不是缺口,但会影响判断)
 
-- 数据库 `SCHEMA_VERSION = 7`;加列走 `db.py` 的 `_MIGRATIONS` 幂等迁移,**不重建表**。
+- 数据库 `SCHEMA_VERSION = 9`；v9 为项目增加固定归档目录。加列走 `db.py` 的 `_MIGRATIONS` 幂等迁移。
   迁移的 `version` 字段是**真门控**(读一次 `PRAGMA user_version`,小于目标才跑),
   早期版本的它被忽略过,别改回去。历史:v5 = `datasets.batch_id`+`samples.links_json`,
   v6 = `analyses.annotation_json`(标注持久化);`batches`/`ec_*` 建表走 `_SCHEMA`
   的 `CREATE IF NOT EXISTS`。
-- **用户真实数据在 `%LOCALAPPDATA%\XRDStudio\data\<ULID>\original.txt`**
+- **用户旧库在 `%LOCALAPPDATA%\XRDStudio`，新版工作库在软件目录的 `XRDStudio/library`。** 旧库曾收录实测谱
   (Rigaku SmartLab,Cu Kα1=1.540593,5–100°,步长 0.02°,4751 点),是验证识别
   算法的宝贵资产 —— 改动 `indexing.py` 后应在其上回归。
   **跑任何写操作前先确认 project/sample id**:这份库是用户的实际工作数据,

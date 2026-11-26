@@ -6,15 +6,24 @@ schema 与 README §8.2 一致,使用 WAL 模式提升并发读性能。
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 10
 
 # 从 v2 → v3 的增量迁移(向后兼容,已存在的库只加列不重建表)。
 # (schema_version, table, column, ddl) —— ddl 执行前会先判列是否存在。
 _MIGRATIONS: tuple[tuple[int, str, str, str], ...] = (
+    (10, "samples", "storage_folder", "ALTER TABLE samples ADD COLUMN storage_folder TEXT"),
+    (9, "projects", "storage_folder", "ALTER TABLE projects ADD COLUMN storage_folder TEXT"),
+    (8, "analyses", "peaks_pipeline_hash", "ALTER TABLE analyses ADD COLUMN peaks_pipeline_hash TEXT"),
+    (8, "datasets", "x_column", "ALTER TABLE datasets ADD COLUMN x_column INTEGER"),
+    (8, "datasets", "y_column", "ALTER TABLE datasets ADD COLUMN y_column INTEGER"),
+    (8, "datasets", "acquisition_wavelength", "ALTER TABLE datasets ADD COLUMN acquisition_wavelength REAL"),
     (3, "peaks", "hkl", "ALTER TABLE peaks ADD COLUMN hkl TEXT"),
     (3, "peaks", "hkl_confidence", "ALTER TABLE peaks ADD COLUMN hkl_confidence TEXT"),
     # v4:把归属依据持久化。此前 dominance 只在内存里算出来,写 peaks 表时
@@ -60,6 +69,7 @@ _SCHEMA = """
 CREATE TABLE IF NOT EXISTS projects (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
+    storage_folder TEXT,
     description TEXT DEFAULT '',
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -70,6 +80,7 @@ CREATE TABLE IF NOT EXISTS samples (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     project_id INTEGER NOT NULL REFERENCES projects(id),
     name TEXT NOT NULL,
+    storage_folder TEXT,
     sample_code TEXT DEFAULT '',
     batch TEXT DEFAULT '',
     material TEXT DEFAULT '',
@@ -95,6 +106,9 @@ CREATE TABLE IF NOT EXISTS datasets (
     stored_path TEXT NOT NULL,
     file_hash TEXT NOT NULL,
     x_axis_type TEXT NOT NULL DEFAULT 'two_theta',
+    acquisition_wavelength REAL,
+    x_column INTEGER,
+    y_column INTEGER,
     x_min REAL,
     x_max REAL,
     step REAL,
@@ -114,6 +128,7 @@ CREATE TABLE IF NOT EXISTS analyses (
     pipeline_json TEXT NOT NULL DEFAULT '{}',
     is_active INTEGER NOT NULL DEFAULT 1,
     annotation_json TEXT,
+    peaks_pipeline_hash TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -196,9 +211,8 @@ CREATE INDEX IF NOT EXISTS idx_profiles_project ON material_profiles(project_id)
 CREATE INDEX IF NOT EXISTS idx_domain_results_analysis
     ON domain_results(analysis_id, domain);
 
--- v7: 电化学(LAND)数据。ec_cells 与 datasets 平行挂 sample 下;
--- 圈统计与分析结果(峰/轨迹/归因)单表存 JSON,dQ/dV 曲线数组存
--- data 目录的 npz(数据库只放参数与指纹,曲线走二进制信封)。
+-- 蓝电 CEX 归档与历史电化学数据。ec_cells 与 datasets 同属样品。
+-- 旧表格的循环统计、分析记录和磁盘缓存供历史备份读取。
 CREATE TABLE IF NOT EXISTS ec_cells (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     sample_id INTEGER NOT NULL REFERENCES samples(id),
@@ -292,9 +306,18 @@ class Database:
                     conn.execute(ddl)
             conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
-    def execute(self, sql: str, params: tuple = ()) -> sqlite3.Cursor:
+    @contextmanager
+    def transaction(self) -> Iterator[sqlite3.Connection]:
         conn = self._conn()
+        if conn.in_transaction:
+            yield conn
+            return
         with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            yield conn
+
+    def execute(self, sql: str, params: tuple = ()) -> sqlite3.Cursor:
+        with self.transaction() as conn:
             return conn.execute(sql, params)
 
     def query_all(self, sql: str, params: tuple = ()) -> list[sqlite3.Row]:
@@ -305,12 +328,29 @@ class Database:
 
     def insert(self, sql: str, params: tuple = ()) -> int:
         """执行 INSERT 并返回 lastrowid。"""
-        conn = self._conn()
-        with conn:
-            cur = conn.execute(sql, params)
-            return int(cur.lastrowid)
+        return int(self.execute(sql, params).lastrowid)
 
     # --- 常用查询 ---
+
+    def project_storage_folder(self, project_id: int) -> str:
+        """项目首次归档时固定目录名；显示名变更不拆分已有文件。"""
+        return self._storage_folder("projects", project_id, "项目")
+
+    def sample_storage_folder(self, sample_id: int) -> str:
+        """样品首次归档蓝电数据时固定存储目录。"""
+        return self._storage_folder("samples", sample_id, "样品")
+
+    def _storage_folder(self, table: str, row_id: int, default_label: str) -> str:
+        with self.transaction() as conn:
+            row = conn.execute(f"SELECT name, storage_folder FROM {table} WHERE id=?", (row_id,)).fetchone()
+            if row is None:
+                raise ValueError(f"{default_label}不存在")
+            if row["storage_folder"]:
+                return row["storage_folder"]
+            label = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", row["name"])[:48].strip().rstrip(". ")
+            folder = f"{int(row_id)}-{label or default_label}"
+            conn.execute(f"UPDATE {table} SET storage_folder=? WHERE id=?", (folder, row_id))
+            return folder
 
     def find_duplicate_by_hash(self, file_hash: str) -> sqlite3.Row | None:
         """SHA-256 查重(§8.4)。
@@ -348,7 +388,10 @@ class Database:
                       p.name AS project_name,
                       (SELECT COUNT(*) FROM datasets d
                        WHERE d.sample_id = s.id AND d.deleted_at IS NULL
-                      ) AS dataset_count
+                      ) AS dataset_count,
+                      (SELECT COUNT(*) FROM ec_cells e
+                       WHERE e.sample_id = s.id AND e.deleted_at IS NULL AND e.format = 'cex'
+                      ) AS electrochem_count
                FROM samples s
                JOIN projects p ON s.project_id = p.id
                WHERE s.deleted_at IS NULL AND p.deleted_at IS NULL
@@ -508,8 +551,6 @@ class Database:
         """列出某对象下所有可清磁盘对象的 (id, stored_path),供 purge。
 
         必须在删 DB 行**之前**调用 —— 行删了就查不到 stored_path 了。
-        ec_cells 与 datasets 一样直接返回自身行;删 sample/project 时
-        ec 的 stored_path 由 purge_sample 内部返回(命令层合并处理)。
         """
         self._check_table(table)
         if table == "datasets":
@@ -536,11 +577,7 @@ class Database:
         )
 
     def purge_ec_cell(self, cell_id: int) -> list[str]:
-        """永久删除一个 ec_cell 及其分析结果,返回 stored_path 列表。
-
-        同目录下的派生文件(records.npz / dqdv_*.npz)由命令层枚举清理,
-        DB 层不碰磁盘(与 purge_dataset 的职责边界一致)。
-        """
+        """永久删除一个 ec_cell 及其分析结果,返回 stored_path 列表。"""
         row = self.query_one(
             "SELECT stored_path FROM ec_cells WHERE id = ?", (cell_id,)
         )
@@ -588,19 +625,16 @@ class Database:
 
     def purge_sample(self, sample_id: int) -> list[str]:
         """永久删除一个 sample 及其全部 dataset / ec_cell,返回要清理的 stored_path 列表。"""
-        paths = [
-            r["stored_path"]
-            for r in self.query_all(
-                "SELECT stored_path FROM datasets WHERE sample_id = ?", (sample_id,)
-            )
-        ]
+        paths = []
         for ds_id in [
             r["id"]
             for r in self.query_all(
                 "SELECT id FROM datasets WHERE sample_id = ?", (sample_id,)
             )
         ]:
-            self.purge_dataset(ds_id)
+            path = self.purge_dataset(ds_id)
+            if path is not None:
+                paths.append(path)
         # 电化学 cell 同属 sample:ec_analyses → ec_cycles → ec_cells(外键序)
         for cell_id in [
             r["id"]
@@ -616,15 +650,7 @@ class Database:
 
     def purge_project(self, project_id: int) -> list[str]:
         """永久删除一个 project 及其全部 sample / dataset / ec_cell / preset。"""
-        paths = [
-            r["stored_path"]
-            for r in self.query_all(
-                """SELECT d.stored_path FROM datasets d
-                   JOIN samples s ON d.sample_id = s.id
-                   WHERE s.project_id = ?""",
-                (project_id,),
-            )
-        ]
+        paths = []
         for sample_id in [
             r["id"]
             for r in self.query_all(

@@ -28,9 +28,11 @@ import os
 import struct
 import sys
 import traceback
+from pathlib import Path
 
 # 冻结 PyInstaller/嵌入式 Python 的常见坑:先确认 stdout 是二进制管道
 from .api.commands import Engine
+from .services.library_upgrade import prepare_library
 
 _HEADER = struct.Struct(">I")
 
@@ -133,9 +135,17 @@ def main() -> int:
     stdin = sys.stdin.buffer if hasattr(sys.stdin, "buffer") else sys.stdin
     stdout = sys.stdout.buffer if hasattr(sys.stdout, "buffer") else sys.stdout
 
-    engine = Engine(data_root)
-    sys.stderr.write(f"xrd-engine ready (data_root={data_root})\n")
-    sys.stderr.flush()
+    engine = None
+    try:
+        legacy = os.environ.get("XRD_LEGACY_DATA_ROOT")
+        if legacy:
+            prepare_library(Path(data_root), Path(legacy))
+        engine = Engine(data_root, log_dir=os.environ.get("XRD_LOG_DIR"))
+    except Exception as exc:
+        startup_error = f"无法打开项目库 {data_root}：{exc}"
+        print(startup_error, file=sys.stderr, flush=True)
+    else:
+        print(f"xrd-engine ready (data_root={data_root})", file=sys.stderr, flush=True)
 
     while True:
         try:
@@ -153,6 +163,9 @@ def main() -> int:
         cmd = request.get("cmd", "")
         payload = request.get("payload") or {}
 
+        if engine is None:
+            write_frame(stdout, {"id": req_id, "ok": False, "error": startup_error})
+            continue
         # 心跳:Rust 侧健康检查用
         if cmd == "ping":
             write_frame(stdout, {"id": req_id, "ok": True, "data": "pong"})
@@ -167,7 +180,8 @@ def main() -> int:
 
         write_frame(stdout, {"id": req_id, **result})
 
-    engine.close()
+    if engine is not None:
+        engine.close()
     return 0
 
 

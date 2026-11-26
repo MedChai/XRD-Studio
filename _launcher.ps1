@@ -28,8 +28,8 @@
 #    XRD_TAURI_DIR app\src-tauri
 #    XRD_DISTNAME  packaged exe file name
 #    XRD_MODE_LBL  run | dev
-#    XRD_DATA_ROOT %LOCALAPPDATA%\XRDStudio
-#    XRD_LOG_DIR   %LOCALAPPDATA%\XRDStudio\logs
+#    XRD_DATA_ROOT %ROOT%\XRDStudio\library
+#    XRD_LOG_DIR   %ROOT%\XRDStudio\logs
 #    XRD_DIST_EXE  packaged exe path (empty in dev mode)
 #
 #  Output protocol (parsed by the .bat wrapper, ASCII only):
@@ -122,6 +122,7 @@ $root    = $env:XRD_ROOT
 $logDir  = $env:XRD_LOG_DIR
 $pidFile = Join-Path $logDir 'launcher.pid'
 $modeLbl = if ($env:XRD_MODE_LBL -eq 'run') { 'run' } else { 'dev' }
+$releasesRoot = Join-Path $root 'XRDStudio\releases'
 $devPort = 1420
 $stdoutLog = Join-Path $logDir 'tauri.stdout.log'
 $stderrLog = Join-Path $logDir 'tauri.stderr.log'
@@ -270,10 +271,41 @@ function Get-OrphanEngines {
 # the case where the launcher console was closed by hand: the npm tree
 # dies but the app window (and its sidecar) keeps running.
 function Get-AppProcesses {
-    $prefix = $env:XRD_TAURI_DIR.TrimEnd('\') + '\target\'
-    @(Get-CimInstance Win32_Process -Filter "Name='app.exe' OR Name='xrd-engine.exe'" -ErrorAction SilentlyContinue |
-      Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($prefix, 'OrdinalIgnoreCase') } |
+    $targetPrefix = $env:XRD_TAURI_DIR.TrimEnd('\') + '\target\'
+    $releasePrefix = $releasesRoot.TrimEnd('\') + '\'
+    @(Get-CimInstance Win32_Process -Filter "Name='XRD Studio.exe' OR Name='app.exe' OR Name='xrd-engine.exe'" -ErrorAction SilentlyContinue |
+      Where-Object { $_.ExecutablePath -and ($_.ExecutablePath.StartsWith($targetPrefix, 'OrdinalIgnoreCase') -or
+                     $_.ExecutablePath.StartsWith($releasePrefix, 'OrdinalIgnoreCase')) } |
       Select-Object -ExpandProperty ProcessId)
+}
+
+function Get-LatestPackagedProgram {
+    $candidates = @($env:XRD_DIST_EXE)
+    foreach ($release in @(Get-ChildItem -LiteralPath $releasesRoot -Directory -ErrorAction SilentlyContinue)) {
+        if ($release.Name -match '^\d+\.\d+\.\d+(\.\d+)?$') {
+            $candidates += Join-Path $release.FullName 'XRD Studio.exe'
+        }
+    }
+    $registryKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\XRD Studio'
+    $installed = Get-ItemProperty -LiteralPath $registryKey -ErrorAction SilentlyContinue
+    if ($installed.DisplayName -eq 'XRD Studio' -and $installed.InstallLocation) {
+        $candidates += Join-Path $installed.InstallLocation.Trim().Trim('"') 'XRD Studio.exe'
+    }
+
+    $packaged = foreach ($candidate in $candidates) {
+        if (-not $candidate -or -not (Test-Path -LiteralPath $candidate -PathType Leaf)) { continue }
+        $program = Get-Item -LiteralPath $candidate
+        $sidecar = Join-Path $program.DirectoryName 'xrd-engine.exe'
+        $runtime = Join-Path $program.DirectoryName '_internal\base_library.zip'
+        if (-not (Test-Path -LiteralPath $sidecar -PathType Leaf) -or
+            -not (Test-Path -LiteralPath $runtime -PathType Leaf)) { continue }
+        $version = [version]'0.0'
+        if (-not [version]::TryParse($program.VersionInfo.FileVersion, [ref]$version)) { continue }
+        [pscustomobject]@{ Program = $program; Version = $version }
+    }
+    $winner = $packaged | Sort-Object Version, @{ Expression = { $_.Program.LastWriteTimeUtc } } -Descending |
+              Select-Object -First 1
+    if ($winner) { return $winner.Program.FullName }
 }
 
 # ===================================================================
@@ -366,6 +398,11 @@ try {
         exit 0
     }
 
+    if ($Mode -eq 'start') {
+        $env:XRD_DIST_EXE = Get-LatestPackagedProgram
+        $modeLbl = if ($env:XRD_DIST_EXE) { 'run' } else { 'dev' }
+    }
+
     # The mutex only covers a live launcher. If the launcher console was
     # closed by hand the app keeps running while the mutex is released,
     # and a second start would fight over port 1420. Catch that here.
@@ -394,6 +431,7 @@ try {
     if ($env:XRD_DIST_EXE -and (Test-Path -LiteralPath $env:XRD_DIST_EXE)) {
         $launch   = $env:XRD_DIST_EXE
         $argsList = @()
+        Say ('Program: ' + $launch)
     } else {
         $launch   = $env:XRD_NPM
         $argsList = @('run', 'tauri', '--', 'dev')

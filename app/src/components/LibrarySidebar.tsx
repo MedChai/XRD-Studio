@@ -1,4 +1,4 @@
-/** 左侧 Library(§17/§18):248px,Sample 条目卡片式,选中淡蓝不亮白。
+/** 左侧 Library(§17/§18):Sample 条目卡片式,选中淡蓝不亮白。
  *
  * 每一层(项目 / 样品 / 数据集)都有 hover 才出现的「⋯」菜单,提供重命名与
  * 移到回收站。菜单用 Radix Popover,与顶栏 ProjectSwitcher 同一范式。
@@ -15,25 +15,44 @@ import {
   useProjectStore,
   useSelectionStore,
   useAnalysisStore,
-  useEcStore,
+  useCexLibraryStore,
   useUiStore,
 } from "../stores";
 import type { DatasetNode, ProjectNode, TrashKind } from "../types/engine";
 import { cn } from "./cn";
 import { RowMenuItems } from "../features/library/TrashDialog";
+import { CexFolderSidebar } from "../features/echem/cex/CexFolderSidebar";
+import { chooseCexFiles, openArchivedCex } from "../features/echem/cex/session";
 import {
   RowContextMenu,
   useRowContextMenu,
   type RowContextOpen,
 } from "./RowContextMenu";
-import { Button } from "./controls";
+import { Button, Segmented } from "./controls";
 import { engineCommand } from "../services/engine";
 import { t } from "../i18n";
 
 export function LibrarySidebar() {
+  const [view, setView] = useState<"samples" | "cex">("samples");
+  return (
+    <aside className="blur-surface flex h-full min-h-0 flex-col bg-[var(--bg-sidebar)]">
+      <div role="group" aria-label="左栏视图" className="px-3 py-2.5">
+        <Segmented value={view} onChange={setView} options={[
+          { value: "samples", label: "样品库" },
+          { value: "cex", label: "蓝电数据" },
+        ]} />
+      </div>
+      <SampleLibrarySidebar active={view === "samples"} />
+      <CexFolderSidebar active={view === "cex"} />
+    </aside>
+  );
+}
+
+function SampleLibrarySidebar({ active }: { active: boolean }) {
   const samples = useProjectStore((s) => s.samples);
   const projects = useProjectStore((s) => s.projects);
   const datasetId = useSelectionStore((s) => s.datasetId);
+  const selectedCexSample = useSelectionStore((s) => s.cexActive ? s.sampleId : null);
   const selectDataset = useSelectionStore((s) => s.selectDataset);
   const loadDataset = useAnalysisStore((s) => s.loadDataset);
   // 选择器订阅:uiStore 里的 toast 计时器每次变化都会触发重渲染,
@@ -43,12 +62,19 @@ export function LibrarySidebar() {
   // 取 length 而非整个数组:选择器返回原始值,不会因数组引用变化而重渲染
   const trashCount = useProjectStore((s) => s.trash.length);
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
+  useEffect(() => {
+    if (selectedCexSample == null) return;
+    setExpanded((old) => old.has(selectedCexSample) ? old : new Set([...old, selectedCexSample]));
+  }, [selectedCexSample]);
   const [query, setQuery] = useState("");
   const [createSampleOpen, setCreateSampleOpen] = useState(false);
   // 行右键菜单(文件行可"在资源管理器中显示")。菜单 portal 到 body,
   // 所以挂在这里的树里任何位置都行 —— 放 aside 尾部,不动现有嵌套。
   const { state: ctxMenu, open: openRowMenu, close: closeRowMenu } =
     useRowContextMenu();
+  useEffect(() => {
+    if (!active) closeRowMenu();
+  }, [active, closeRowMenu]);
 
   const byProject = projects.map((p) => ({
     project: p,
@@ -60,13 +86,7 @@ export function LibrarySidebar() {
   }));
 
   return (
-    <aside
-      className="blur-surface flex shrink-0 flex-col border-r border-[var(--divider)] bg-[var(--bg-sidebar)]"
-      style={{ width: "var(--sidebar-w)" }}
-    >
-      <div className="px-3 pt-3 pb-1 text-[11px] font-semibold uppercase tracking-wide text-[var(--text-tertiary)]">
-        {t.library.title}
-      </div>
+    <div className={cn("min-h-0 flex-1 flex-col", active ? "flex" : "hidden")}>
       <div className="px-3 pb-2">
         <div className="flex items-center gap-1.5 rounded-[var(--radius-input)] border border-[var(--divider)] bg-[var(--bg-panel)] px-2 py-1">
           <span className="text-[12px] text-[var(--text-tertiary)]">⌕</span>
@@ -136,9 +156,9 @@ export function LibrarySidebar() {
         </button>
         <button
           className="tr flex items-center gap-1.5 px-4 py-1.5 text-[12px] text-[var(--text-secondary)] hover:bg-[var(--hover)] hover:text-[var(--text-primary)]"
-          onClick={() => useUiStore.getState().setEcImportOpen(true)}
+          onClick={() => void chooseCexFiles()}
         >
-          <BatteryCharging size={13} /> {t.echem.importEntry}
+          <BatteryCharging size={13} /> 打开蓝电 CEX
         </button>
         <button
           className="tr flex items-center gap-1.5 px-4 py-1.5 text-[12px] text-[var(--text-secondary)] hover:bg-[var(--hover)] hover:text-[var(--text-primary)]"
@@ -160,8 +180,8 @@ export function LibrarySidebar() {
       </div>
       <NewExperimentDialog open={createSampleOpen} onOpenChange={setCreateSampleOpen} />
       {/* portal 到 body 渲染:祖先的 backdrop-filter 不会把 fixed 菜单困在侧栏里 */}
-      <RowContextMenu state={ctxMenu} onClose={closeRowMenu} />
-    </aside>
+      <RowContextMenu state={ctxMenu} onClose={closeRowMenu} onAddCex={(id) => void chooseCexFiles(id)} />
+    </div>
   );
 }
 
@@ -296,6 +316,7 @@ function RowMenu({
             id={id}
             name={name}
             onClose={() => setOpen(false)}
+            onAddCex={table === "samples" ? () => void chooseCexFiles(id) : undefined}
           />
         </Popover.Content>
       </Popover.Portal>
@@ -322,6 +343,11 @@ function ProjectGroup({
   onRowContext: RowContextOpen;
 }) {
   const [open, setOpen] = useState(true);
+  const selectedCexSample = useSelectionStore((s) => s.cexActive ? s.sampleId : null);
+  const selectedHere = selectedCexSample != null && samples.some((sample) => sample.id === selectedCexSample);
+  useEffect(() => {
+    if (selectedHere) setOpen(true);
+  }, [selectedHere, selectedCexSample]);
   return (
     <div className="mb-1">
       <div
@@ -342,7 +368,7 @@ function ProjectGroup({
       {open &&
         samples.map((s) => {
           const isOpen = expanded.has(s.id);
-          const hasSelected = s.datasets.some((d) => d.id === selectedDatasetId);
+          const hasSelected = s.id === selectedCexSample || s.datasets.some((d) => d.id === selectedDatasetId);
           return (
             <div key={s.id}>
               <div
@@ -367,8 +393,9 @@ function ProjectGroup({
                   <span className="flex-1 truncate text-[13px] text-[var(--text-primary)]">
                     {s.name}
                   </span>
-                  <span className="tabular text-[11px] text-[var(--text-tertiary)]">
-                    {s.dataset_count}
+                  <span className="tabular text-[11px] text-[var(--text-tertiary)]"
+                    title={"XRD " + s.dataset_count + " · 电化学 " + (s.electrochem_count ?? 0)}>
+                    {s.dataset_count + (s.electrochem_count ?? 0)}
                   </span>
                 </button>
                 <RowMenu table="samples" id={s.id} name={s.name} />
@@ -461,7 +488,7 @@ function ProjectGroup({
   );
 }
 
-/** 样品下的电化学 cell 列表(ec.cells,懒加载)。 */
+/** 样品下的 CEX 归档与历史备份。 */
 function EcCellsRow({
   sampleId,
   onRowContext,
@@ -469,24 +496,43 @@ function EcCellsRow({
   sampleId: number;
   onRowContext: RowContextOpen;
 }) {
-  const cells = useEcStore((s) => s.cellsBySample[sampleId]);
-  const loadCells = useEcStore((s) => s.loadCells);
+  const listing = useCexLibraryStore((s) => s.bySample[sampleId]);
+  const revision = useCexLibraryStore((s) => s.revision);
+  const loadCells = useCexLibraryStore((s) => s.loadCells);
   const selectedCellId = useSelectionStore((s) => s.cellId);
-  const selectCell = useSelectionStore((s) => s.selectCell);
-  const loadCell = useEcStore((s) => s.loadCell);
+  const [backingUp, setBackingUp] = useState(false);
 
   useEffect(() => {
     void loadCells(sampleId);
-  }, [sampleId, loadCells]);
+  }, [sampleId, loadCells, revision]);
 
-  if (!cells || cells.length === 0) return null;
+  async function backup() {
+    const notify = useUiStore.getState().showToast;
+    setBackingUp(true);
+    try {
+      const { save } = await import("@tauri-apps/plugin-dialog");
+      const path = await save({ defaultPath: "蓝电历史表格备份.zip", filters: [{ name: "ZIP", extensions: ["zip"] }] });
+      if (!path) return;
+      const result = await engineCommand<{ path: string; count: number; missing: number }>("cex.backup_legacy", { sample_id: sampleId, path });
+      if (result.ok) {
+        const { count, missing } = result.data;
+        notify("success", `已备份 ${count} 项历史数据${missing ? `，其中 ${missing} 项库内原件缺失` : ""}`);
+      } else notify("error", result.error);
+    } catch (error) {
+      notify("error", error instanceof Error ? error.message : String(error));
+    } finally {
+      setBackingUp(false);
+    }
+  }
+
+  if (!listing || (!listing.cells.length && !listing.historyCount)) return null;
   return (
     <div>
       <div className="flex items-center gap-1 px-3 pb-0.5 pt-1.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--text-tertiary)]">
         <BatteryCharging size={10} className="shrink-0" />
-        {t.echem.cellsSection}
+        蓝电 CEX
       </div>
-      {cells.map((c) => (
+      {listing.cells.map((c) => (
         <div
           key={c.id}
           className={cn(
@@ -499,10 +545,7 @@ function EcCellsRow({
         >
           <button
             className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
-            onClick={() => {
-              selectCell(sampleId, c.id);
-              void loadCell(c.id);
-            }}
+            onClick={() => void openArchivedCex(sampleId, c.id)}
           >
             <BatteryCharging
               size={11}
@@ -524,12 +567,18 @@ function EcCellsRow({
               {c.name}
             </span>
             <span className="tabular shrink-0 text-[11px] text-[var(--text-tertiary)]">
-              {t.echem.cyclesBadge(c.cycleCount)}
+              {c.cycleCount} 圈
             </span>
           </button>
           <RowMenu table="ec_cells" id={c.id} name={c.name} />
         </div>
       ))}
+      {listing.historyCount > 0 && (
+        <button type="button" disabled={backingUp} className="mx-3 my-1 rounded px-2 py-1 text-left text-[11px] text-[var(--text-secondary)] hover:bg-[var(--hover)]"
+          onClick={() => void backup()}>
+          {backingUp ? "正在打包历史数据…" : `导出历史表格备份 · ${listing.historyCount} 项`}
+        </button>
+      )}
     </div>
   );
 }

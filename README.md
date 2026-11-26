@@ -424,8 +424,7 @@ Workspace └ Project ─┬─ Sample ─┬─ Batch(可选) ─┬─ Dataset
 
 批次是**可选层**:导入时"批次"留空就不建,数据集直接挂实验下 —— 不强迫
 用户维护一个他不需要的层级。同名批次按 `sample_id + name` **复用**,分两次
-导入同一批文件不会得到两个看不出区别的同名组。电化学 cell(`ec_cells`)与
-Dataset 同层,直接挂 Sample,见 docs/DEVELOPMENT_EC.md。
+导入同一批文件不会得到两个看不出区别的同名组。蓝电 CEX 归档与 Dataset 同层，直接挂到 Sample。打开 CEX 后，在蓝电工作区选择 **dQ/dV** 查看曲线、热图和峰分析。[CEX 开发文档](./docs/DEVELOPMENT_EC.md)
 
 ## 8.2 SQLite 表(`xrdstudio.db`)
 
@@ -486,18 +485,19 @@ id, project_id, name, pipeline_json, created_at, updated_at
 `analyses` / `peaks` / `analysis_presets` **没有** `deleted_at`:它们的可见性
 完全由父级决定,加列只会制造需要同步的冗余状态。
 
-`meta.purge` 是唯一真正删磁盘(`data/<ULID>/`)的入口;软删除刻意不碰文件,
-以便恢复时数据仍然完整。
+`meta.purge` 清理回收站条目对应的托管副本。软删除保留谱文件，可随条目一起恢复。
 
-## 8.3 Data Store 目录(与 v1 一致)
+## 8.3 项目库目录
 
 ```text
-XRD Studio/
-├── database/xrdstudio.db
-├── data/<ULID>/original.<ext> + metadata.json
-├── cache/          -- 重采样与背景曲线缓存(可随时删)
-├── exports/
-└── logs/           -- 引擎日志(用户可见入口:Settings → About → Open Logs)
+软件目录/XRDStudio/
+├── library/
+│   ├── database/xrdstudio.db
+│   ├── projects/<项目编号-项目名>/<导入编号>/<原始谱文件名>
+│   ├── data/        -- 电化学原件副本与解析缓存
+│   ├── cache/
+│   └── exports/
+└── logs/
 ```
 
 ## 8.4 导入安全(与 v1 一致)
@@ -509,7 +509,7 @@ This dataset already exists. (Project / Sample / 文件名)
 [ Open Existing ]  [ Import Anyway ]
 ```
 
-路径注意:`stored_path` 一律相对 Data Store 根目录存,Data Store 可整体迁移;安装与运行前检测非 ASCII 路径,若安装目录含中文且引发 sidecar 问题,回退 `%LOCALAPPDATA%\XRDStudio`(见 §11.4)。
+数据集右键或「⋯」菜单提供「定位项目副本」和「定位原始文件」。项目显示名可修改，磁盘目录沿用首次归档时的编号与名称。同名谱文件分别保存在自己的导入目录中。备份整个 `library` 可同时保留索引、分析和谱文件。首次启动新版时，如检测到旧版用户库，会在软件目录创建独立副本，保留旧库。
 
 ---
 
@@ -650,21 +650,12 @@ trend.series           { project_id, metric?, x_axis? } → { points[] }
 —— 导出 ——
 export.figure / export.data / export.peaks
 
-—— 电化学(LAND dQ/dV 归因,详见 docs/DEVELOPMENT_EC.md) ——
-ec.preview          { path } → { session, qa, n_cycles, mass_mg_estimate }
-ec.import           { paths[], project_id, sample_id? | new_sample?,
-                      active_mass_mg?, import_anyway? }
-ec.cells            { sample_id } → { cells[] }
-ec.cell_overview    { cell_id } → { session, qa, cycles[] }
-ec.dqdv_compute     { cell_id, params? } → { peaks[], tracks[], paramsHash }
-ec.dqdv_state       { cell_id } → { computed, paramsHash }
-ec.dqdv_result      { cell_id } → { computed, params, peaks[], tracks[] }
-                    (读回上次固化的明细+参数快照,重启后免重算)
-ec.dqdv_curve       { cell_id, cycle, direction } → Envelope(binary, v/dqdv)
-ec.dqdv_waterfall   { cell_id, direction, step } → Envelope(binary, matrix)
-ec.attribution_run  { cell_id, params? } → { cycles[], conclusion, ... }
-ec.attribution_get  { cell_id } → { computed, stale, ... }
-ec.export           { cell_id, kind: cycles|peaks|attribution }
+—— 蓝电 CEX ——
+cex.open            { path | cell_id } → { id, counts, massMg, ... }
+cex.cells           { sample_id } → { cells[], historyCount }
+cex.dqdv            { id, cycles?, settings?, offset?, limit? } → { results[], total, sha256, algorithm }
+cex.dqdv_source     { id, record } → { record, step, cycle, points[] }
+cex.backup_legacy   { sample_id, path? } → { path, count, missing }
 
 —— 预设 ——
 presets.save / list / apply
@@ -687,9 +678,7 @@ presets.save / list / apply
 > `peaks.update_bounds`(M4,峰表双击左界/右界)已接上 UI;
 > `peaks.list` 仍无前端调用(峰表走 preview/state 内存峰)。
 >
-> **2026-10-06 修订:** 新增 `ec.*` 命名空间(电化学 LAND 数据,v7 schema:
-> `ec_cells`/`ec_cycles`/`ec_analyses`)。`meta.*` 的 table 白名单与回收站
-> 同步扩展了 `ec_cells`。engine 依赖新增 `openpyxl`。
+> 电化学数据入口使用 `.cex`。旧表格及计算记录可从样品的「导出历史表格备份」打包。`openpyxl` 用于蓝电数据表的 Excel 导出。
 
 `trash.list` 的 `kind` 用**表名**(`projects`/`samples`/`batches`/`datasets`/
 `ec_cells`),前端可以

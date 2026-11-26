@@ -1,6 +1,6 @@
 [project]
 name = "xrd-engine"
-version = "0.4.0"
+version = "0.4.3"
 description = "XRD Studio 分析引擎"
 requires-python = ">=3.11"
 

@@ -6,6 +6,7 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
+import { Group, Panel, Separator, useDefaultLayout } from "react-resizable-panels";
 import { TopBar } from "./components/TopBar";
 import { LibrarySidebar } from "./components/LibrarySidebar";
 import { StatusBar } from "./components/StatusBar";
@@ -20,8 +21,8 @@ import { RangeOverview } from "./features/plot/RangeOverview";
 import { PeakDrawer } from "./features/peaks/PeakDrawer";
 import { Inspector } from "./features/processing/Inspector";
 import { ImportSheet } from "./features/import/ImportSheet";
-import { CellPage } from "./features/echem/CellPage";
-import { EcImportSheet } from "./features/echem/EcImportSheet";
+import { CexWorkspace } from "./features/echem/cex/CexWorkspace";
+import { chooseCexFiles, openCexFiles } from "./features/echem/cex/session";
 import { CommandPalette } from "./features/settings/CommandPalette";
 import { SettingsDialog } from "./features/settings/SettingsDialog";
 import { TrendPanel } from "./features/trend/TrendPanel";
@@ -39,18 +40,16 @@ import { t } from "./i18n";
 
 const isTauri = "__TAURI_INTERNALS__" in window;
 
-/** 底部范围框高度。只在有曲线时才占位,否则空状态下方会多一条空白带。 */
-const rangeOverviewHeight = 56;
-
 export default function App() {
   const theme = useAppStore((s) => s.theme);
   const loadLibrary = useProjectStore((s) => s.load);
   const curve = useAnalysisStore((s) => s.curve);
   const loadedDatasetId = useAnalysisStore((s) => s.loadedDatasetId);
-  const cellId = useSelectionStore((s) => s.cellId);
+  const cexActive = useSelectionStore((s) => s.cexActive);
   const trendOpen = useUiStore((s) => s.trendOpen);
   const setTrendOpen = useUiStore((s) => s.setTrendOpen);
   const [dragging, setDragging] = useState(false);
+  const libraryLayout = useDefaultLayout({ id: "xrd-library", onlySaveAfterUserInteractions: true });
 
   // 主题初始化
   useEffect(() => {
@@ -63,13 +62,13 @@ export default function App() {
     }
   }, [theme]);
 
-  // Library 加载 + 默认选中第一个数据集(用户已选电化学 cell 时不抢占)
+  // Library 加载后默认选中第一个谱图。已打开的 CEX 保有焦点。
   useEffect(() => {
     void loadLibrary().then(() => {
       const { samples } = useProjectStore.getState();
-      const { datasetId, cellId: curCell } = useSelectionStore.getState();
+      const { datasetId, cexActive: cex } = useSelectionStore.getState();
       const first = samples[0]?.datasets[0];
-      if (first && datasetId == null && curCell == null) {
+      if (first && datasetId == null && !cex) {
         useSelectionStore.getState().selectDataset(samples[0].id, first.id);
         void useAnalysisStore.getState().loadDataset(first.id);
       }
@@ -84,7 +83,8 @@ export default function App() {
       const mod = e.ctrlKey || e.metaKey;
       // 谱图专属快捷键在电化学模式下禁用:撤销栈是标注的、fitAll 是
       // 谱图的 —— 电化学页里触发只会改到看不见的状态。
-      const ecActive = useSelectionStore.getState().cellId != null;
+      const selection = useSelectionStore.getState();
+      const ecActive = selection.cexActive;
       if (mod && e.key.toLowerCase() === "k") {
         e.preventDefault();
         useUiStore.getState().setPaletteOpen(!useUiStore.getState().paletteOpen);
@@ -93,9 +93,12 @@ export default function App() {
         if (ecActive) return;
         if (e.shiftKey) useAnalysisStore.getState().redo();
         else useAnalysisStore.getState().undo();
+      } else if (mod && e.key.toLowerCase() === "o" && isTauri) {
+        e.preventDefault();
+        void chooseCexFiles();
       } else if (mod && e.key === "i") {
         e.preventDefault();
-        if (ecActive) useUiStore.getState().setEcImportOpen(true);
+        if (selection.cexActive) void chooseCexFiles(selection.sampleId ?? undefined);
         else useUiStore.getState().setImportOpen(true);
       } else if (mod && e.key === "0") {
         // Ctrl+0 = Fit All(与 macOS 惯例一致)
@@ -123,7 +126,10 @@ export default function App() {
         setDragging(true);
       } else if (event.payload.type === "drop") {
         setDragging(false);
-        useUiStore.getState().setPendingDropPaths(event.payload.paths);
+        const cexPaths = event.payload.paths.filter((path) => /\.cex$/i.test(path));
+        const otherPaths = event.payload.paths.filter((path) => !/\.cex$/i.test(path));
+        if (cexPaths.length) void openCexFiles(cexPaths);
+        if (otherPaths.length) useUiStore.getState().setPendingDropPaths(otherPaths);
       } else {
         setDragging(false);
       }
@@ -138,61 +144,37 @@ export default function App() {
     return () => unlisten?.();
   }, [registerDragDrop]);
 
-  const empty = !curve && loadedDatasetId == null && cellId == null;
-  /** 选中电化学 cell → 主工作区整体切到电池页面(XRD 图区/峰抽屉/
-   *  范围框都是谱图语境,混排只会互相挤压)。Inspector 同样隐藏 ——
-   *  它整栏是 XRD 处理控件(PROCESSING/HIGH-NI/PEAKS),电化学
-   *  页面里只会误导(且状态栏已同步切换,见 StatusBar)。 */
-  const showEc = cellId != null;
+  const empty = !curve && loadedDatasetId == null;
 
   return (
     <div className="flex h-full flex-col">
       <TopBar />
-      <div className="flex min-h-0 flex-1">
-        <LibrarySidebar />
-        <main className="flex min-w-0 flex-1 flex-col">
-          {showEc ? (
-            <div className="min-h-0 flex-1">
-              <CellPage />
-            </div>
-          ) : (
-            <>
-              <PlotHeader />
-              <div className="relative min-h-0 flex-1">
-                {empty ? (
-                  <EmptyState />
-                ) : (
-                  <XRDChart />
-                )}
-                {dragging && <DropOverlay />}
-              </div>
-              <PeakDrawer />
-            </>
-          )}
-        </main>
-        {!showEc && <Inspector />}
-      </div>
-      {/* 底部通栏范围框:横跨 Sidebar + 绘图区 + Inspector。
-          内部左右留出与两栏等宽的内边距,使缩略图与绘图区对齐,
-          而容器底色保持通栏 —— 视觉上是"通栏分隔带 + 居中的缩略图"。
-          没有曲线时不占位,免得空状态下方多一条空白带。 */}
-      {!empty && !showEc && (
-        <div
-          className="shrink-0 border-t border-[var(--divider)] bg-[var(--bg-panel)]"
-          style={{ height: rangeOverviewHeight }}
-        >
-          <div
-            className="h-full"
-            style={{ paddingLeft: "var(--sidebar-w)", paddingRight: "var(--inspector-w)" }}
-          >
-            <RangeOverview />
-          </div>
-        </div>
-      )}
+      <Group className="min-h-0 flex-1" defaultLayout={libraryLayout.defaultLayout}
+        onLayoutChanged={libraryLayout.onLayoutChanged}>
+        <Panel id="library" defaultSize={248} minSize={168} maxSize="42%" groupResizeBehavior="preserve-pixel-size">
+          <LibrarySidebar />
+        </Panel>
+        <Separator className="pane-divider" aria-label="调整左侧列表宽度" title="拖动调整左侧列表宽度" />
+        <Panel id="work-area" className="flex min-h-0">
+          <main className="relative flex min-w-0 flex-1 flex-col">
+            {cexActive ? <CexWorkspace /> : (
+              <>
+                <PlotHeader />
+                <div className="relative min-h-0 flex-1">
+                  {empty ? <EmptyState /> : <XRDChart />}
+                </div>
+                <RangeOverview />
+                <PeakDrawer />
+              </>
+            )}
+            {dragging && <DropOverlay />}
+          </main>
+          {!cexActive && <Inspector />}
+        </Panel>
+      </Group>
       <StatusBar />
 
       <ImportSheet />
-      <EcImportSheet />
       <NewProjectDialog />
       <RenameDialog />
       <TrashDialog />
@@ -227,7 +209,7 @@ function DropOverlay() {
   return (
     <div className="absolute inset-2 z-30 flex flex-col items-center justify-center rounded-[var(--radius-panel)] border-2 border-dashed border-[var(--accent)] bg-[color-mix(in_srgb,var(--accent)_8%,transparent)]">
       <div className="text-[15px] font-medium text-[var(--accent)]">{t.empty.dropHere}</div>
-      <div className="mt-1 text-[12px] text-[var(--text-secondary)]">{t.import.formats}</div>
+      <div className="mt-1 text-[12px] text-[var(--text-secondary)]">{t.import.formats} · 蓝电 .cex</div>
     </div>
   );
 }

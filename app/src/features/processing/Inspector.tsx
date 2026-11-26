@@ -147,7 +147,7 @@ export function Inspector() {
     let alive = true;
     setHighNiResult(null);
     setHighNiStale(false);
-    if (loadedDatasetId == null) return () => { alive = false; };
+    if (loadedDatasetId == null || status !== "idle") return () => { alive = false; };
     void engineCommand<{
       found: boolean;
       result: HighNiResult | null;
@@ -158,7 +158,7 @@ export function Inspector() {
       setHighNiStale(r.data.stale);
     });
     return () => { alive = false; };
-  }, [loadedDatasetId]);
+  }, [loadedDatasetId, curve?.wavelength, pipeline, status]);
 
   useEffect(() => {
     setCropMinDraft(crop.x_min == null ? "" : String(crop.x_min));
@@ -243,6 +243,7 @@ export function Inspector() {
       showToast("error", t.inspector.presetNoTarget);
       return;
     }
+    if (!await useAnalysisStore.getState().flushEdits()) return;
     const r = await engineCommand<{ applied: number }>("presets.apply", {
       preset_id: presetId,
       dataset_ids: ids,
@@ -283,6 +284,7 @@ export function Inspector() {
 
   async function runHighNiAnalysis() {
     if (loadedDatasetId == null) return;
+    if (!await useAnalysisStore.getState().flushEdits()) return;
     setHighNiBusy(true);
     const result = await engineCommand<HighNiResult>("domain.high_ni.analyze", {
       dataset_id: loadedDatasetId,
@@ -291,6 +293,7 @@ export function Inspector() {
       fit: true,
     });
     setHighNiBusy(false);
+    if (useAnalysisStore.getState().loadedDatasetId !== loadedDatasetId) return;
     if (!result.ok) {
       showToast("error", result.error);
       return;
@@ -302,7 +305,7 @@ export function Inspector() {
 
   async function annotateHkl() {
     // 「标注晶面」= 权威重算:走 store.recomputeAnnotation(引擎侧会
-    // 覆盖 annotation_json、清 stale;合并逻辑与后台补标共用一份)。
+    // 覆盖 annotation_json 并返回已保存的峰表)。
     await recomputeAnnotation();
   }
 
@@ -768,7 +771,7 @@ export function Inspector() {
           </Button>
           <Button
             kind="ghost"
-            disabled={loadedDatasetId == null || annotating}
+            disabled={loadedDatasetId == null || annotating || curve?.xAxisType === "generic"}
             onClick={() => void annotateHkl()}
             // 全谱精修首次 1.5–4.5s;之后命中 _FIT_CACHE 亚秒。说清楚
             // 免得用户以为点了没反应(P1)。
