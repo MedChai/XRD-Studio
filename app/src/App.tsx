@@ -22,6 +22,7 @@ import { PeakDrawer } from "./features/peaks/PeakDrawer";
 import { Inspector } from "./features/processing/Inspector";
 import { ImportSheet } from "./features/import/ImportSheet";
 import { CexWorkspace } from "./features/echem/cex/CexWorkspace";
+import { ChiWorkspace } from "./features/echem/chi/ChiWorkspace";
 import { chooseCexFiles, openCexFiles } from "./features/echem/cex/session";
 import { CommandPalette } from "./features/settings/CommandPalette";
 import { SettingsDialog } from "./features/settings/SettingsDialog";
@@ -46,6 +47,7 @@ export default function App() {
   const curve = useAnalysisStore((s) => s.curve);
   const loadedDatasetId = useAnalysisStore((s) => s.loadedDatasetId);
   const cexActive = useSelectionStore((s) => s.cexActive);
+  const chiActive = useSelectionStore((s) => s.chiActive);
   const trendOpen = useUiStore((s) => s.trendOpen);
   const setTrendOpen = useUiStore((s) => s.setTrendOpen);
   const [dragging, setDragging] = useState(false);
@@ -66,9 +68,9 @@ export default function App() {
   useEffect(() => {
     void loadLibrary().then(() => {
       const { samples } = useProjectStore.getState();
-      const { datasetId, cexActive: cex } = useSelectionStore.getState();
+      const { datasetId, cexActive: cex, chiActive: chi } = useSelectionStore.getState();
       const first = samples[0]?.datasets[0];
-      if (first && datasetId == null && !cex) {
+      if (first && datasetId == null && !cex && !chi) {
         useSelectionStore.getState().selectDataset(samples[0].id, first.id);
         void useAnalysisStore.getState().loadDataset(first.id);
       }
@@ -84,6 +86,7 @@ export default function App() {
       // 谱图专属快捷键在电化学模式下禁用:撤销栈是标注的、fitAll 是
       // 谱图的 —— 电化学页里触发只会改到看不见的状态。
       const selection = useSelectionStore.getState();
+      if (selection.chiActive && e.key !== "Escape") return;
       const ecActive = selection.cexActive;
       if (mod && e.key.toLowerCase() === "k") {
         e.preventDefault();
@@ -122,6 +125,10 @@ export default function App() {
     if (!isTauri) return;
     const { getCurrentWebview } = await import("@tauri-apps/api/webview");
     return getCurrentWebview().onDragDropEvent((event) => {
+      if (useSelectionStore.getState().chiActive) {
+        setDragging(false);
+        return;
+      }
       if (event.payload.type === "enter" || event.payload.type === "over") {
         setDragging(true);
       } else if (event.payload.type === "drop") {
@@ -149,7 +156,7 @@ export default function App() {
   return (
     <div className="flex h-full flex-col">
       <TopBar />
-      <Group className="min-h-0 flex-1" defaultLayout={libraryLayout.defaultLayout}
+      {chiActive ? <ChiWorkspace /> : <Group className="min-h-0 flex-1" defaultLayout={libraryLayout.defaultLayout}
         onLayoutChanged={libraryLayout.onLayoutChanged}>
         <Panel id="library" defaultSize={248} minSize={168} maxSize="42%" groupResizeBehavior="preserve-pixel-size">
           <LibrarySidebar />
@@ -171,8 +178,8 @@ export default function App() {
           </main>
           {!cexActive && <Inspector />}
         </Panel>
-      </Group>
-      <StatusBar />
+      </Group>}
+      {!chiActive && <StatusBar />}
 
       <ImportSheet />
       <NewProjectDialog />

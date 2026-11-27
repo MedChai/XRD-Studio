@@ -2,13 +2,12 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "XRD Studio",
   "mainBinaryName": "XRD Studio",
-  "version": "0.4.3",
+  "version": "0.4.5",
   "identifier": "studio.xrd.app",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run build",
-    "beforeBundleCommand": "..\\engine\\.venv\\Scripts\\python.exe ..\\engine\\scripts\\build_sidecar.py",
+    "beforeBuildCommand": "npm run build && ..\\engine\\.venv\\Scripts\\python.exe ..\\engine\\scripts\\build_sidecar.py",
     "frontendDist": "../dist"
   },
   "app": {

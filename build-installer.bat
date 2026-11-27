@@ -5,17 +5,13 @@ rem
 rem  Produces:
 rem    app\src-tauri\target\release\bundle\nsis\XRD Studio_*.exe
 rem
-rem  Steps:
-rem    1. PyInstaller onedir sidecar  ->  app\src-tauri\sidecar\
-rem    2. npm run build (frontend, also run by tauri)
-rem    3. cargo release + NSIS bundle
+rem  Tauri builds the frontend and PyInstaller sidecar before bundling.
 rem
 rem  Requires: Node.js, Rust/MSVC, engine\.venv with [packaging] extras.
 rem  Pure ASCII (same rule as other root .bat scripts).
 rem ===================================================================
 
 setlocal EnableExtensions
-setlocal EnableDelayedExpansion
 
 set "ROOT=%~dp0"
 if "%ROOT:~-1%"=="\" set "ROOT=%ROOT:~0,-1%"
@@ -41,13 +37,17 @@ if not exist "%NPX_TAURI%" (
     exit /b 1
 )
 
-echo [1/3] Python sidecar ^(PyInstaller onedir^) ...
-"%PYTHON_EXE%" "%ENGINE_DIR%\scripts\build_sidecar.py"
-if errorlevel 1 exit /b 1
+set "TEMP=%ENGINE_DIR%\build\release-temp"
+set "TMP=%TEMP%"
+set "PYINSTALLER_CONFIG_DIR=%ENGINE_DIR%\build\pyinstaller-cache"
+set "npm_config_cache=%ENGINE_DIR%\build\npm-cache"
+if not exist "%TEMP%\." mkdir "%TEMP%"
+if not exist "%TEMP%\." exit /b 1
+set "XRD_PACK_TOOLCHAIN=%ENGINE_DIR%\build\windows-toolchain\use.ps1"
 
-echo [2/3] Frontend + cargo release + NSIS ...
+echo Building frontend, Python sidecar, and NSIS installer ...
 pushd "%APPDIR%"
-call "%NPX_TAURI%" build --bundles nsis
+powershell -NoProfile -ExecutionPolicy Bypass -Command "if (Test-Path -LiteralPath $env:XRD_PACK_TOOLCHAIN -PathType Leaf) { . $env:XRD_PACK_TOOLCHAIN }; & $env:NPX_TAURI build --bundles nsis; exit $LASTEXITCODE"
 set "CODE=%ERRORLEVEL%"
 popd
 if not "%CODE%"=="0" (
@@ -56,8 +56,7 @@ if not "%CODE%"=="0" (
 )
 
 echo.
-echo [OK] Installer:
-dir /b "%TAURI_DIR%\target\release\bundle\nsis\*.exe"
+echo [OK] See the path reported by Tauri above for this build.
 echo.
 echo Install that .exe on a machine without the repo, then launch
 echo "XRD Studio" from the Start Menu ^(or the install folder^).

@@ -13,7 +13,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 # 从 v2 → v3 的增量迁移(向后兼容,已存在的库只加列不重建表)。
 # (schema_version, table, column, ddl) —— ddl 执行前会先判列是否存在。
@@ -261,6 +261,19 @@ CREATE TABLE IF NOT EXISTS ec_analyses (
 CREATE INDEX IF NOT EXISTS idx_ec_cells_sample ON ec_cells(sample_id);
 CREATE INDEX IF NOT EXISTS idx_ec_cycles_cell ON ec_cycles(cell_id, cycle_index);
 CREATE INDEX IF NOT EXISTS idx_ec_analyses_cell ON ec_analyses(cell_id, kind);
+
+CREATE TABLE IF NOT EXISTS chi_datasets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sample_id INTEGER REFERENCES samples(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK (kind IN ('CV', 'EIS')),
+    name TEXT NOT NULL,
+    source_path TEXT NOT NULL,
+    stored_path TEXT NOT NULL,
+    sha256 TEXT NOT NULL,
+    point_count INTEGER NOT NULL,
+    fit_json TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_chi_sample_hash ON chi_datasets(sample_id, sha256);
 """
 
 
@@ -643,6 +656,9 @@ class Database:
             )
         ]:
             paths.extend(self.purge_ec_cell(cell_id))
+        paths.extend(r["stored_path"] for r in self.query_all(
+            "SELECT stored_path FROM chi_datasets WHERE sample_id = ?", (sample_id,)
+        ))
         # datasets 清完后 batches 已无引用者,但外键仍在,必须先删
         self.execute("DELETE FROM batches WHERE sample_id = ?", (sample_id,))
         self.execute("DELETE FROM samples WHERE id = ?", (sample_id,))

@@ -28,11 +28,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%\_launcher.ps1"
 set "CODE=%ERRORLEVEL%"
 
 if not "%CODE%"=="0" (
-    echo.
-    echo [i] Exit code %CODE%.
-    echo [i] Tauri stdout: %XRD_LOG_DIR%\tauri.stdout.log
-    echo [i] Tauri stderr: %XRD_LOG_DIR%\tauri.stderr.log
-    echo [i] Engine log:   %XRD_LOG_DIR%\engine.log
+    if not "%CODE%"=="4" (
+        echo.
+        echo [i] Exit code %CODE%.
+        echo [i] Tauri stdout: %XRD_LOG_DIR%\tauri.stdout.log
+        echo [i] Tauri stderr: %XRD_LOG_DIR%\tauri.stderr.log
+        echo [i] Engine log:   %XRD_LOG_DIR%\engine.log
+    )
     pause
 )
 endlocal & exit /b %CODE%

@@ -5,7 +5,7 @@ import { Button } from "../../../components/controls";
 import { cn } from "../../../components/cn";
 import { COMPARE_COLORS } from "../../../services/engine";
 import { useAnalysisStore, useSelectionStore, useUiStore } from "../../../stores";
-import { EcLineChart, type EcSeries } from "../EcLineChart";
+import { EcChartModeSelect, EcLineChart, type EcChartMode, type EcSeries } from "../EcLineChart";
 import { CexDataPane, CexTable } from "./CexDataPane";
 import { CexCycleOverview } from "./CexCycleOverview";
 import { CexArchiveDialog, CexExportDialog, CexInfoDialog } from "./CexDialogs";
@@ -25,6 +25,7 @@ const PLOT_AXES: Record<CexPlotKind, { x: string; y: string; u?: Unit; second?: 
   specificCycles: { x: "循环序号", y: "比容量", u: "mAh/g", second: "库仑效率", secondUnit: "%" },
   steps: { x: "工步序号", y: "容量", u: "mAh", second: "能量", secondUnit: "mWh" },
 };
+const CYCLE_SYMBOLS: Record<string, EcSeries["symbol"]> = { 充电: "circle", 放电: "diamond", 库仑效率: "triangle" };
 const sideBySideQuery = "(min-width: 1160px)";
 
 function described(name: string, unit: Unit | undefined, base: boolean) {
@@ -32,11 +33,12 @@ function described(name: string, unit: Unit | undefined, base: boolean) {
 }
 
 function CexPlot({
-  result, kind, base, focus, locate, exportName,
+  result, kind, base, mode, focus, locate, exportName,
 }: {
   result: CexSeries[];
   kind: CexPlotKind;
   base: boolean;
+  mode: EcChartMode;
   focus?: CexLocation | null;
   locate?: (number: number) => void;
   exportName?: string;
@@ -62,6 +64,7 @@ function CexPlot({
         recordNumbers: source.points.map((point) => point[2]),
         color: COMPARE_COLORS[(colors.get(group) ?? 0) % COMPARE_COLORS.length],
         dashed: source.dashed,
+        symbol: kind === "cycles" || kind === "specificCycles" ? CYCLE_SYMBOLS[source.name] : undefined,
       };
     });
   }, [result, axes, base, kind]);
@@ -74,11 +77,13 @@ function CexPlot({
   return (
     <EcLineChart
       series={series}
+      mode={mode}
       height="100%"
       xName={described(axes.x, kind === "voltageCapacity" ? "mAh" : undefined, base)}
       y1Name={described(axes.y, axes.u, base)}
       y2Name={axes.second && described(axes.second, axes.secondUnit, base)}
       formatX={kind === "time" ? elapsed : undefined}
+      xMinInterval={kind === "time" || kind === "voltageCapacity" ? undefined : 1}
       focusedPoint={focusedPoint}
       onRecord={locate}
       exportName={exportName}
@@ -116,6 +121,8 @@ function CexDocumentView({ doc }: { doc: CexDocument }) {
   const [range, setRange] = useState({ first: 1, last: size || 1 });
   const [dragRange, setDragRange] = useState<typeof range | null>(null);
   const [kind, setKind] = useState<CexPlotKind>("time");
+  const [modes, setModes] = useState<Partial<Record<CexPlotKind, EcChartMode>>>({});
+  const mode = modes[kind] ?? (kind === "cycles" || kind === "specificCycles" ? "scatter" : "line");
   const [cycle, setCycle] = useState(1);
   const [base, setBase] = useState(false);
   const [focus, setFocus] = useState<CexLocation | null>(null);
@@ -215,6 +222,7 @@ function CexDocumentView({ doc }: { doc: CexDocument }) {
                 onChange={(event) => setKind(event.target.value as CexPlotKind)}>
                 {CEX_PLOTS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
               </select>
+              <EcChartModeSelect value={mode} onChange={(value) => setModes((current) => ({ ...current, [kind]: value }))} />
               {size > 0 && (
                 <SegmentControls key={range.first + ":" + range.last} total={size} {...range} apply={setSection} />
               )}
@@ -249,7 +257,7 @@ function CexDocumentView({ doc }: { doc: CexDocument }) {
             )}
             <div className="min-h-0 flex-1 p-2">
               {plot?.kind === kind && plot.series.some((item) => item.points.some((point) => point[1] != null)) ? (
-                <CexPlot result={plot.series} {...{ kind, base, locate }} focus={dragRange ? null : focus}
+                <CexPlot result={plot.series} {...{ kind, base, mode, locate }} focus={dragRange ? null : focus}
                   exportName={currentPlot && !preview ? doc.name + "-" + kind : undefined} />
               ) : <EmptyPlot label={currentPlot ? plot?.error ?? "该范围内没有可绘制的曲线" : "正在绘制曲线…"} />}
             </div>
@@ -296,6 +304,7 @@ function ComparisonView({ docs }: { docs: CexDocument[] }) {
   const [common, setCommon] = useState("r1");
   const [ignoreRest, setIgnoreRest] = useState(true);
   const [base, setBase] = useState(false);
+  const [mode, setMode] = useState<EcChartMode>("line");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [result, setResult] = useState<{ series: CexSeries[]; rows: CexComparison[] }>();
@@ -376,7 +385,8 @@ function ComparisonView({ docs }: { docs: CexDocument[] }) {
         </div>
       </section>
       <section aria-label="循环叠图结果" className="flex min-h-0 min-w-0 flex-col">
-        <div className="flex justify-end border-b border-[var(--divider)] px-3 py-2">
+        <div className="flex justify-end gap-2 border-b border-[var(--divider)] px-3 py-2">
+          <EcChartModeSelect value={mode} onChange={setMode} />
           <select aria-label="对比容量单位" className="cex-input" value={base ? "base" : "milli"}
             onChange={(event) => setBase(event.target.value === "base")}>
             <option value="milli">mAh</option><option value="base">Ah</option>
@@ -384,7 +394,7 @@ function ComparisonView({ docs }: { docs: CexDocument[] }) {
         </div>
         <div className="min-h-32 flex-1 p-2">
           {result?.series.length ? (
-            <CexPlot result={result.series} kind="voltageCapacity" base={base} exportName="蓝电循环对比" />
+            <CexPlot result={result.series} kind="voltageCapacity" base={base} mode={mode} exportName="蓝电循环对比" />
           ) : <EmptyPlot label={error || (busy ? "正在读取对比曲线…" : "选择文件和圈号后叠加曲线")} />}
         </div>
         {result && (

@@ -1,6 +1,6 @@
 [package]
 name = "app"
-version = "0.4.3"
+version = "0.4.5"
 description = "XRD Studio — XRD 数据工作台"
 authors = ["XRD Studio"]
 edition = "2021"

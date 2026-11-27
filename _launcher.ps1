@@ -90,6 +90,7 @@ function J([string]$hexes) {
 }
 
 $T = @{
+    DevBlocked  = J '5F00 53D1 7248 5C1A 672A 542F 52A8 3002 8BF7 5148 5173 95ED 5F53 524D 0020 0058 0052 0044 0020 0053 0074 0075 0064 0069 006F 0020 7A97 53E3 FF0C 518D 8FD0 884C 0020 0073 0074 0061 0072 0074 002D 0064 0065 0076 002E 0062 0061 0074 3002'
     Banner2     = J '542F 52A8 5668'                                             # qi dong qi  (launcher)
     Tauri       = J '0074 0061 0075 0072 0069'                                   # tauri
     Starting    = J '6B63 5728 542F 52A8 5E94 7528 2026'                         # starting app...
@@ -279,6 +280,16 @@ function Get-AppProcesses {
       Select-Object -ExpandProperty ProcessId)
 }
 
+function Get-AppWindows {
+    foreach ($appId in @(Get-AppProcesses)) {
+        $program = Get-Process -Id $appId -ErrorAction SilentlyContinue
+        if ($program -and $program.ProcessName -ne 'xrd-engine' -and
+            $program.MainWindowHandle -ne [IntPtr]::Zero -and $program.MainWindowTitle) {
+            $program
+        }
+    }
+}
+
 function Get-LatestPackagedProgram {
     $candidates = @($env:XRD_DIST_EXE)
     foreach ($release in @(Get-ChildItem -LiteralPath $releasesRoot -Directory -ErrorAction SilentlyContinue)) {
@@ -390,10 +401,28 @@ try {
     # second app (which would fight over port 1420 / the SQLite store).
     $mutex = New-Object System.Threading.Mutex($true, 'Local\XRDStudioLauncher', [ref]$created)
 
-    if (-not $created) {
+    # A direct launch can leave a process behind before WebView opens.
+    # Outside an active launcher, only a real app window blocks startup.
+    $runningApps = @(Get-AppWindows)
+    if (-not $created -or $runningApps.Count -gt 0) {
         Rule
         SayWarn $T.AlreadyRun
-        Say $T.AlreadyHint
+        if ($Mode -eq 'dev') {
+            foreach ($program in $runningApps) {
+                Say ('Program: ' + $program.Path)
+            }
+            SayWarn $T.DevBlocked
+            Write-Host ''
+            exit 4
+        }
+        $activated = $false
+        if ($runningApps.Count -gt 0) {
+            try {
+                $shell = New-Object -ComObject WScript.Shell
+                $activated = $shell.AppActivate([int]$runningApps[0].Id)
+            } catch { }
+        }
+        if (-not $activated) { Say $T.AlreadyHint }
         Write-Host ''
         exit 0
     }
@@ -401,17 +430,6 @@ try {
     if ($Mode -eq 'start') {
         $env:XRD_DIST_EXE = Get-LatestPackagedProgram
         $modeLbl = if ($env:XRD_DIST_EXE) { 'run' } else { 'dev' }
-    }
-
-    # The mutex only covers a live launcher. If the launcher console was
-    # closed by hand the app keeps running while the mutex is released,
-    # and a second start would fight over port 1420. Catch that here.
-    if (@(Get-AppProcesses).Count -gt 0) {
-        Rule
-        SayWarn $T.AlreadyRun
-        Say $T.AlreadyHint
-        Write-Host ''
-        exit 0
     }
 
     Rule
@@ -423,6 +441,10 @@ try {
             Write-Host ''
             Write-Output 'XRD-EXIT-CODE=3'
             exit 3
+        }
+        $portableToolchain = Join-Path $root 'engine\build\windows-toolchain\use.ps1'
+        if (Test-Path -LiteralPath $portableToolchain -PathType Leaf) {
+            . $portableToolchain
         }
     }
 

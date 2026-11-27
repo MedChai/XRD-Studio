@@ -8,6 +8,8 @@
 | `stop.bat` | **一键关闭**。结束应用 + Vite + Python 分析引擎。没在运行时双击也无害 |
 | `start-dev.bat` | **改代码时启动**。强制走 `npm run tauri dev`，带热重载，即使已有打包版本也走开发模式 |
 
+已打开 XRD Studio 时，请先关闭当前窗口，再运行 `start-dev.bat`。开发版窗口标题包含版本号和「开发版」。
+
 ## 为什么用脚本，而不是直接双击 app.exe
 
 `app/src-tauri/target/debug/app.exe` 是 dev 构建，前端地址编译期就固定指向
@@ -74,15 +76,14 @@ grep -n '[^ -~]' _launcher.ps1    # 应当没有任何输出
 产物：
 
 ```text
-app\src-tauri\target\release\bundle\nsis\XRD Studio_0.3.0_x64-setup.exe
+app\src-tauri\target\release\bundle\nsis\XRD Studio_<版本号>_x64-setup.exe
 ```
 
 安装包已打进 Python 分析引擎（PyInstaller **onedir**，与主程序同目录的
 `xrd-engine.exe` + `_internal\`），装完即可用，**不需要**本仓库、Node、
 Rust 或 `engine\.venv`。WebView2 用 embedBootstrapper（缺运行时会静默装）。
 
-仓库根目录若有 `XRDStudio-0.3.0-x64-setup.exe`，是同一次构建的拷贝，直接
-发给用户即可。
+构建完成后，Tauri 会打印本次安装包的完整路径。设置了 `CARGO_TARGET_DIR` 时，安装包在该目录下的 `release/bundle/nsis` 中。
 
 ## 前置依赖
 

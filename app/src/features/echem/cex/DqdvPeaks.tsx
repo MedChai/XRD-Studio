@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { Button } from "../../../components/controls";
 import { COMPARE_COLORS } from "../../../services/engine";
-import { EcLineChart, type EcSeries } from "../EcLineChart";
+import { EcChartModeSelect, EcLineChart, type EcChartMode, type EcSeries } from "../EcLineChart";
 import { directionLabel, measurePeak, type AnalyzedCex, type TraceRef } from "./dqdv";
 
 export interface PeakRow {
@@ -65,6 +65,7 @@ export function DqdvPeaks({ rows, sources, unit, areaUnit, metadata, label, from
   exporting: boolean;
 }) {
   const [metric, setMetric] = useState<"voltage" | "area">("voltage");
+  const [mode, setMode] = useState<EcChartMode>("scatter");
   const series = useMemo<EcSeries[]>(() => {
     const grouped = new Map<string, { title: string; file: string; points: Map<number, number | null> }>();
     for (const row of rows) {
@@ -104,16 +105,17 @@ export function DqdvPeaks({ rows, sources, unit, areaUnit, metadata, label, from
       </div>
       {rows.length > 0 ? (
         <>
-          <div className="flex items-center gap-2 px-3 pt-2 text-[12px]">
+          <div className="flex flex-wrap items-center gap-2 px-3 pt-2 text-[12px]">
             <label>趋势 <select className="cex-input ml-1" value={metric}
               onChange={(event) => setMetric(event.target.value === "area" ? "area" : "voltage")}>
               <option value="voltage">峰位</option><option value="area">窗口积分</option>
             </select></label>
+            <EcChartModeSelect value={mode} onChange={setMode} />
             <span className="text-[var(--text-secondary)]">取窗口内主峰。峰高和半峰宽以窗口两端连线为基线。</span>
           </div>
           <div className="min-h-32 flex-1 px-2">
             <EcLineChart series={series} xName="循环序号" y1Name={metric === "area" ? `窗口积分 (${areaUnit})` : "峰位 (V)"}
-              height="100%" xMinInterval={1} exportName="CEX-dQdV-峰趋势" figureMetadata={{ ...metadata, metric }} />
+              mode={mode} height="100%" xMinInterval={1} exportName="CEX-dQdV-峰趋势" figureMetadata={{ ...metadata, metric }} />
           </div>
           <div className="max-h-[36%] min-h-25 overflow-auto border-t border-[var(--divider)]">
             <table className="w-full text-left text-[11px] tabular-nums">

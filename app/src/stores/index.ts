@@ -214,6 +214,7 @@ interface SelectionState {
    *  主工作区要么是 XRD 谱图,要么是电化学页面。 */
   cellId: number | null;
   cexActive: boolean;
+  chiActive: boolean;
   /** "ds:<id>" 形式的曲线显隐集合;null 表示全选 */
   hiddenCurves: Set<string> | null;
   /** 联动中枢(§35):点击表格行 ↔ 点击图中峰 */
@@ -221,6 +222,7 @@ interface SelectionState {
   /** 传 null 表示清空选择(数据集被删除时) */
   selectDataset: (sampleId: number | null, datasetId: number | null) => void;
   selectCex: (sampleId?: number | null, cellId?: number | null) => void;
+  setChiActive: (active: boolean) => void;
   toggleCurve: (key: string) => void;
   setSelectedPeak: (index: number | null) => void;
 }
@@ -230,6 +232,7 @@ export const useSelectionStore = create<SelectionState>((set) => ({
   datasetId: null,
   cellId: null,
   cexActive: false,
+  chiActive: false,
   hiddenCurves: null,
   selectedPeakIndex: null,
   selectDataset: (sampleId, datasetId) =>
@@ -245,10 +248,11 @@ export const useSelectionStore = create<SelectionState>((set) => ({
             .samples.find((s) => s.datasets.some((d) => d.id === datasetId))
             ?.id ?? null;
       }
-      return { sampleId: sid, datasetId, selectedPeakIndex: null, cellId: null, cexActive: false };
+      return { sampleId: sid, datasetId, selectedPeakIndex: null, cellId: null, cexActive: false, chiActive: false };
     }),
   selectCex: (sampleId = null, cellId = null) =>
-    set({ sampleId, cellId, datasetId: null, selectedPeakIndex: null, hiddenCurves: null, cexActive: true }),
+    set({ sampleId, cellId, datasetId: null, selectedPeakIndex: null, hiddenCurves: null, cexActive: true, chiActive: false }),
+  setChiActive: (chiActive) => set({ chiActive }),
   toggleCurve: (key) =>
     set((s) => {
       const cur = new Set(s.hiddenCurves ?? []);

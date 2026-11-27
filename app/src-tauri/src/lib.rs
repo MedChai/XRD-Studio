@@ -14,6 +14,7 @@ use std::sync::{Mutex, OnceLock};
 use std::thread;
 
 use serde_json::Value;
+use tauri::Manager;
 
 /// 一个请求的响应通道:{"id": n, ...engine 响应}
 /// 一个响应 = JSON 头 + 可选二进制体(曲线信封,§9.1)。
@@ -369,6 +370,14 @@ async fn engine_command(cmd: String, payload: String) -> Result<tauri::ipc::Resp
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .setup(|app| {
+            if cfg!(dev) {
+                if let Some(window) = app.get_webview_window("main") {
+                    window.set_title(&format!("XRD Studio {}（开发版）", app.package_info().version))?;
+                }
+            }
+            Ok(())
+        })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![engine_command])

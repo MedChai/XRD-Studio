@@ -4,7 +4,7 @@ import { Button, Segmented } from "../../../components/controls";
 import { COMPARE_COLORS } from "../../../services/engine";
 import { exportCexDqdvCurves, exportDqdvTable } from "../../../services/exports";
 import { useUiStore } from "../../../stores";
-import { EcLineChart, type EcSeries } from "../EcLineChart";
+import { EcChartModeSelect, EcLineChart, type EcChartMode, type EcSeries } from "../EcLineChart";
 import { DqdvHeatmap } from "./DqdvHeatmap";
 import { displayNumber, DqdvPeaks, peakRows } from "./DqdvPeaks";
 import {
@@ -45,6 +45,7 @@ export function CexDqdvView({ primary, docs }: { primary: CexDocument; docs: Cex
   const [grid, setGrid] = useState(String(defaults.gridMv));
   const [smooth, setSmooth] = useState(String(defaults.smoothingMv));
   const [view, setView] = useState<View>("curves");
+  const [mode, setMode] = useState<EcChartMode>("line");
   const [direction, setDirection] = useState<Direction | "both">("both");
   const [normalized, setNormalized] = useState(false);
   const [masses, setMasses] = useState<Record<string, string>>({});
@@ -292,6 +293,7 @@ export function CexDqdvView({ primary, docs }: { primary: CexDocument; docs: Cex
             onChange={(event) => { setDirection(event.target.value as typeof direction); setFocus(null); setPage(0); }}>
             <option value="both">充放电</option><option value="charge">充电</option><option value="discharge">放电</option>
           </select>}
+          {view === "curves" && <EcChartModeSelect value={mode} onChange={setMode} />}
           <span className="flex-1" />
           {view === "curves" && !!settings.smoothingMv && (
             <label className="flex items-center gap-1"><input type="checkbox" checked={rawOverlay}
@@ -323,7 +325,7 @@ export function CexDqdvView({ primary, docs }: { primary: CexDocument; docs: Cex
           </div>}
           <div className="min-h-32 flex-1 px-2 py-1">
             {series.length ? <EcLineChart series={series} xName="电压 (V)" y1Name={`dQ/dV (${unit})`}
-              height="100%" onRecord={(record, name) => {
+              mode={mode} height="100%" onRecord={(record, name) => {
                 const ref = sourceBySeries.get(name);
                 if (ref) void locate(ref, record);
               }}

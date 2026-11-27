@@ -30,6 +30,8 @@ from ..coords import DEFAULT_WAVELENGTH, convert
 from ..database.db import ALLOWED_TABLES, Database
 from ..electrochem.cex_native import CexError
 from ..electrochem.cex_viewer import CexViewer
+from ..electrochem.chi import ChiError
+from ..electrochem.chi_workspace import ChiWorkspace
 from ..high_ni import HighNiProfile, analyze_high_ni, default_profile
 from ..high_ni.analysis import as_two_theta
 from ..importers.loader import (
@@ -53,7 +55,7 @@ from ..processing.pipeline import PipelineError, run_pipeline, validate_params
 from ..services.data_store import DataStore, sha256_of_file
 from .envelope import BIN_KEY, pack_arrays
 
-ENGINE_VERSION = "0.4.3"
+ENGINE_VERSION = "0.4.5"
 
 
 class EngineError(Exception):
@@ -249,6 +251,7 @@ class Engine:
         self.log_dir = Path(log_dir) if log_dir else self.store.root / "logs"
         self.db = Database(self.store.db_path)
         self.cex = CexViewer(self.store, self.db)
+        self.chi = ChiWorkspace(self.store, self.db)
         # 已解析曲线缓存(§9.3)。见 _load_dataset_curve 的说明。
         self._curve_cache: dict[int, tuple[tuple, Curve]] = {}
 
@@ -265,7 +268,7 @@ class Engine:
             return _fail(exc)
         except PipelineError as exc:
             return _fail(exc)
-        except CexError as exc:
+        except (CexError, ChiError) as exc:
             return _fail(exc)
         except Exception as exc:
             # traceback 进日志文件,不给用户看(§68)
@@ -1992,6 +1995,24 @@ class Engine:
         # 释放内存并避免同指纹新数据意外复用(P6)。
         clear_stage_cache()
         return removed
+
+    # ---------- CHI 工作站 ----------
+
+    def _cmd_chi_list(self, p: dict) -> dict:
+        return self.chi.list(p)
+
+    def _cmd_chi_import(self, p: dict) -> dict:
+        return self.chi.import_files(p)
+
+    def _cmd_chi_open(self, p: dict) -> dict:
+        return self.chi.open(p)
+
+    def _cmd_chi_fit(self, p: dict) -> dict:
+        return self.chi.fit(p)
+
+    def _cmd_chi_export(self, p: dict) -> dict:
+        target = self._export_target(p.get("path"), "chi_data.csv")
+        return self.chi.export(p["id"], target)
 
     # ---------- cex(蓝电原始数据)----------
 

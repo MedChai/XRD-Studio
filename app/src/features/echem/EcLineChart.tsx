@@ -1,4 +1,4 @@
-/** 电化学折线/堆叠面积图(与 TrendPanel 同一做法:ECharts + cssVar 主题)。
+/** 电化学曲线、散点和堆叠面积图(ECharts + cssVar 主题)。
  *
  *  这里不复用 XRDChart —— 那是谱图专用(x/y 信封、缩放、十字光标全绑
  *  在 XRD 数据模型上);电化学需要的是"几条趋势线 + 双 y 轴 + 堆叠面积",
@@ -19,6 +19,25 @@ function cssVar(name: string): string {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 }
 
+export type EcChartMode = "line" | "lineAndPoints" | "scatter";
+
+export function EcChartModeSelect({ value, onChange }: {
+  value: EcChartMode;
+  onChange: (value: EcChartMode) => void;
+}) {
+  return (
+    <label className="inline-flex shrink-0 items-center gap-1.5 text-[12px] text-[var(--text-secondary)]">
+      样式
+      <select aria-label="绘图样式" className="cex-input" value={value}
+        onChange={(event) => onChange(event.target.value as EcChartMode)}>
+        <option value="line">折线</option>
+        <option value="lineAndPoints">点线</option>
+        <option value="scatter">散点</option>
+      </select>
+    </label>
+  );
+}
+
 export interface EcSeries {
   name: string;
   /** [x, y] 点列;y 为 null 的点不连线(缺失 ≠ 0)。 */
@@ -28,6 +47,7 @@ export interface EcSeries {
   /** area = 堆叠面积(归因三分量用);line = 普通折线。 */
   kind?: "line" | "area";
   dashed?: boolean;
+  symbol?: "circle" | "diamond" | "triangle";
   /** 空心点(不完整末圈等异常标记)。 */
   hollow?: boolean;
   recordNumbers?: (number | null)[];
@@ -35,6 +55,7 @@ export interface EcSeries {
 
 export function EcLineChart({
   series,
+  mode = "line",
   xName,
   y1Name,
   y2Name,
@@ -50,6 +71,7 @@ export function EcLineChart({
   xMinInterval,
 }: {
   series: EcSeries[];
+  mode?: EcChartMode;
   xName: string;
   y1Name: string;
   y2Name?: string;
@@ -217,43 +239,54 @@ export function EcLineChart({
               ]
             : []),
         ],
-        series: series.map((s, index) => ({
-          name: s.name,
-          type: "line" as const,
-          yAxisIndex: s.yAxisIndex ?? 0,
-          data: s.data,
-          connectNulls: false,
-          symbol: s.hollow ? "emptyCircle" : s.data.length === 1 ? "circle" : "none",
-          showSymbol: !!s.hollow || s.data.length === 1,
-          symbolSize: s.hollow || s.data.length === 1 ? 7 : 0,
-          step: false,
-          smooth: false,
-          lineStyle: {
-            color: s.color ?? cssVar("--accent"),
-            width: s.dashed ? 1.2 : 1.6,
-            type: s.dashed ? ("dashed" as const) : ("solid" as const),
-          },
-          itemStyle: {
-            color: s.hollow ? "transparent" : (s.color ?? cssVar("--accent")),
-            borderColor: s.color ?? cssVar("--text-tertiary"),
-            borderWidth: 1.5,
-          },
-          ...(index === 0 && selectedRange ? { markArea: {
-            silent: true, itemStyle: { color: cssVar("--accent"), opacity: 0.12 },
-            data: [[{ xAxis: selectedRange[0] }, { xAxis: selectedRange[1] }]],
-          } } : {}),
-          ...(s.kind === "area"
-            ? {
-                stack: "total",
-                areaStyle: { opacity: 0.55 },
-                emphasis: { focus: "series" as const },
-              }
-            : {}),
-        })),
       },
       { notMerge: true },
     );
   }, [series, xName, y1Name, y2Name, y2Percent, formatX, selectedRange, xMinInterval]);
+
+  // 单独更新系列样式，切换模式时保留当前缩放和图例选择。
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart) return;
+    const accent = cssVar("--accent");
+    chart.setOption({
+      series: series.map((item, index): echarts.LineSeriesOption | echarts.ScatterSeriesOption => {
+        const area = item.kind === "area";
+        const scatter = !area && mode === "scatter";
+        const showSymbol = (!area && mode !== "line") || !!item.hollow || item.data.length === 1;
+        const color = item.color ?? accent;
+        const markArea: echarts.LineSeriesOption["markArea"] = index === 0 && selectedRange ? {
+          silent: true,
+          itemStyle: { color: accent, opacity: 0.12 },
+          data: [[{ xAxis: selectedRange[0] }, { xAxis: selectedRange[1] }]],
+        } : undefined;
+        const common = {
+          name: item.name,
+          yAxisIndex: item.yAxisIndex ?? 0,
+          data: item.data,
+          symbol: item.hollow ? "emptyCircle" : item.symbol ?? "circle",
+          symbolSize: item.hollow || item.data.length === 1 ? 7 : item.data.length > 1000 ? 3 : 5,
+          itemStyle: {
+            color: item.hollow ? "transparent" : color,
+            ...(item.hollow || item.data.length === 1 ? { borderColor: color, borderWidth: 1.5 } : {}),
+          },
+          markArea,
+        };
+        if (scatter) return { ...common, type: "scatter" };
+        return {
+          ...common,
+          type: "line",
+          symbol: showSymbol ? common.symbol : "none",
+          showSymbol,
+          connectNulls: false,
+          step: false,
+          smooth: false,
+          lineStyle: { color, width: item.dashed ? 1.2 : 1.6, type: item.dashed ? "dashed" : "solid" },
+          ...(area ? { stack: "total", areaStyle: { opacity: 0.55 }, emphasis: { focus: "series" } } : {}),
+        };
+      }),
+    }, { replaceMerge: ["series"] });
+  }, [series, mode, xName, y1Name, y2Name, y2Percent, formatX, selectedRange, xMinInterval]);
 
   useEffect(() => {
     if (focusedPoint === undefined) return;
@@ -271,7 +304,7 @@ export function EcLineChart({
         };
       }),
     });
-  }, [series, focusedPoint, xName, y1Name, y2Name, y2Percent, formatX, selectedRange, xMinInterval]);
+  }, [series, mode, focusedPoint, xName, y1Name, y2Name, y2Percent, formatX, selectedRange, xMinInterval]);
 
   return (
     // 外层只做定位(按钮要压在图上);echarts.init 独占内层 ref div,
